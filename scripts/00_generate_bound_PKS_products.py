@@ -11,7 +11,7 @@ import multiprocessing as mp
 import bcs
 
 # set the maximum number of extension modules to be used in generating PKS products
-max_extension_modules = 3
+max_extension_modules = 4
 
 # restrict the number of stereoisomers produced by restricting the KR subtypes that are allowed
 # this can be changed to allow for more stereoisomers to be generated later on
