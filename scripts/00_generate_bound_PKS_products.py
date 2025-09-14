@@ -11,7 +11,7 @@ import multiprocessing as mp
 import bcs
 
 # set the maximum number of extension modules to be used in generating PKS products
-max_extension_modules = 4
+max_extension_modules = 3
 
 # restrict the number of stereoisomers produced by restricting the KR subtypes that are allowed
 # this can be changed to allow for more stereoisomers to be generated later on
@@ -105,4 +105,7 @@ if __name__ == "__main__":
 
     print(f"Successfully generated {len(all_cluster_product_pairs)} (cluster, product) pairs.\n")
 
-    print(all_cluster_product_pairs[:5])  # print first 5 pairs as a sample
+    with open(output_filepath, "wb") as f:
+        import pickle
+        pickle.dump(all_cluster_product_pairs, f)
+    print(f"Saved all (cluster, product) pairs to {output_filepath}\n")
