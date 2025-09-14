@@ -11,11 +11,7 @@ import multiprocessing as mp
 import bcs
 
 # set the maximum number of extension modules to be used in generating PKS products
-max_extension_modules = 4
-
-# restrict the number of stereoisomers produced by restricting the KR subtypes that are allowed
-# this can be changed to allow for more stereoisomers to be generated later on
-allowed_KR_subtypes = ['B1', 'B']
+max_extension_modules = 3
 
 # set output filepath for saving generated (cluster, product) pairs
 output_filepath = f"../data/raw/bound_PKS_products_{max_extension_modules}_ext_mods.pkl"
@@ -49,7 +45,7 @@ def modify_bcs_starters_extenders(starter_codes: Optional[List[str]] = None,
 # allow for all starter units to be used in generatation of PKS products
 starter_codes = None 
 
-# for extenders, only allow Malonyl-CoA and Methylmalonyl-CoA
+# for extenders, only allow Malonyl-CoA, Methylmalonyl-CoA, Ethylmalonyl-CoA, 
 extender_codes = ['Malonyl-CoA', 'Methylmalonyl-CoA']
 
 modify_bcs_starters_extenders(starter_codes = starter_codes, extender_codes = extender_codes)
