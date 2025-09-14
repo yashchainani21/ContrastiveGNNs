@@ -29,3 +29,13 @@ print((f"\nNumber of extender units: {len(bcs.extenders)}\n"))
 # import retrotide and structureDB only after modifying bcs.starters and bcs.extenders
 from retrotide import retrotide, structureDB
 print(f"\nNumber of entries in structureDB: {len(structureDB)}\n")
+
+# restrict the number of stereoisomers produced by restricting the KR subtypes that are allowed
+# this can be changed to allow for more stereoisomers to be generated later on
+allowed_KR_subtypes = ['B1', 'B']
+
+def build_bcs_cluster_and_product(starter, extension_mods_combo):
+    """
+    Build a bcs PKS cluster and its corresponding PKS product given a starter unit and extension module
+    """
+    
