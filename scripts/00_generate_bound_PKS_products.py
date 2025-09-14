@@ -1,5 +1,4 @@
 from typing import List, Optional
-from retrotide import retrotide, structureDB
 import bcs
 
 def modify_bcs_starters_extenders(starter_codes: Optional[List[str]] = None,
@@ -26,3 +25,7 @@ extender_codes = ['Malonyl-CoA', 'Methylmalonyl-CoA']
 modify_bcs_starters_extenders(starter_codes = starter_codes, extender_codes = extender_codes)
 print((f"\nNumber of starter units: {len(bcs.starters)}"))
 print((f"\nNumber of extender units: {len(bcs.extenders)}\n"))
+
+# import retrotide and structureDB only after modifying bcs.starters and bcs.extenders
+from retrotide import retrotide, structureDB
+print(f"\nNumber of entries in structureDB: {len(structureDB)}\n")
