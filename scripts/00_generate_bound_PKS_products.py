@@ -1,6 +1,24 @@
+"""
+In this script, bound PKS products are synthetically generated using the bcs package.
+All starter units are allowed, but the extender units are restricted to Malonyl-CoA and Methylmalonyl-CoA.
+The number of stereoisomers produced is also restricted by limiting the KR subtypes that are allowed (this can be changed).
+"""
+
 from typing import List, Optional
 from collections import OrderedDict
+from itertools import product
+import multiprocessing as mp
 import bcs
+
+# set the maximum number of extension modules to be used in generating PKS products
+max_extension_modules = 4
+
+# restrict the number of stereoisomers produced by restricting the KR subtypes that are allowed
+# this can be changed to allow for more stereoisomers to be generated later on
+allowed_KR_subtypes = ['B1', 'B']
+
+# set output filepath for saving generated (cluster, product) pairs
+output_filepath = f"../data/raw/bound_PKS_products_{max_extension_modules}_ext_mods.pkl"
 
 def modify_bcs_starters_extenders(starter_codes: Optional[List[str]] = None,
                                   extender_codes: Optional[List[str]] = None):
@@ -42,10 +60,6 @@ print((f"\nNumber of extender units: {len(bcs.extenders)}\n"))
 from retrotide import retrotide, structureDB
 print(f"\nNumber of entries in structureDB: {len(structureDB)}\n")
 
-# restrict the number of stereoisomers produced by restricting the KR subtypes that are allowed
-# this can be changed to allow for more stereoisomers to be generated later on
-allowed_KR_subtypes = ['B1', 'B']
-
 def build_bcs_cluster_and_product(starter: str, 
                                   extension_mods_combo):
     """
@@ -62,9 +76,33 @@ def build_bcs_cluster_and_product(starter: str,
 
         # generate PKS product
         product_mol = cluster.computeProduct(structureDB)
-
         return cluster, product_mol
 
     except Exception as e:
         print(f"Error building loading module with starter {starter} combo {extension_mods_combo}: {e}")
         return None, None
+    
+extension_modules_list = list(structureDB.keys())
+
+if __name__ == "__main__":
+
+    all_cluster_product_pairs = []
+
+    with mp.Pool() as pool:
+        for i in range(1, max_extension_modules + 1):
+            print(f"\nGenerating clusters and products with {i} extension module(s)...\n")
+
+        # create all possible (starter, extension_combo) pairs
+        starter_plus_ext_mods_combos = product(bcs.starters.keys(), product(extension_modules_list, repeat = i))
+
+        # build clusters and products in parallel
+        results_i = pool.starmap(build_bcs_cluster_and_product, starter_plus_ext_mods_combos)
+
+        # filter out failed builds
+        results_i = [r for r in results_i if None not in r]
+
+        all_cluster_product_pairs.extend(results_i)
+
+    print(f"Successfully generated {len(all_cluster_product_pairs)} (cluster, product) pairs.\n")
+
+    print(all_cluster_product_pairs[:5])  # print first 5 pairs as a sample
