@@ -76,3 +76,26 @@ if __name__ == '__main__':
             generated_bioproducts_list.append(generated_bioproduct_smiles)
 
         return generated_bioproducts_list
+    
+    # process each precursor in the assigned chunk
+    my_results = []
+    for precursor in my_precursors:
+        my_results.append(perform_DORAnet_bio_1step(precursor))
+
+    # flatten the results for this rank
+    my_results = [item for sublist in my_results for item in sublist]
+
+    # gather results from all ranks to rank 0
+    all_results = comm.gather(my_results, root = 0)
+
+    if rank == 0:
+        # combine and deduplicate results
+        combined_results = set()
+        for sublist in all_results:
+            combined_results.update(sublist)
+
+        print(f"\nTotal unique bioproducts generated: {len(combined_results)}\n", flush = True)
+
+    # save the results to the output file
+    with open(output_filepath, "w") as f:
+        f.write('\n'.join(combined_results))
