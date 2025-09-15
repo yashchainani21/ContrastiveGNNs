@@ -8,8 +8,9 @@ RDLogger.DisableLog('rdApp.*')
 
 if __name__ == '__main__':
 
-    # define PKS products to modify
+    # define PKS products to modify and number of post-PKS bio steps
     max_extension_modules = 3
+    num_bio_steps = 1
 
     # MPI initialization
     comm = MPI.COMM_WORLD
@@ -18,7 +19,7 @@ if __name__ == '__main__':
 
     # define filepaths for PKS unbound PKS products
     precursors_filepath = f'../data/interim/unbound_PKS_products_{max_extension_modules}_ext_mods_no_stereo.pkl'
-    output_filepath = f'../data/interim/DORAnet_BIO1_from_PKS_products_{max_extension_modules}_ext_mods_no_stereo.txt'
+    output_filepath = f'../data/interim/DORAnet_BIO{num_bio_steps}_from_PKS_products_{max_extension_modules}_ext_mods_no_stereo.txt'
 
     # only rank 0 reads files and sets up initial data
     if rank == 0:
