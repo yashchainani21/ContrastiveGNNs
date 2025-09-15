@@ -57,3 +57,26 @@ if __name__ == '__main__':
         my_precursors = []
 
     print(f"[Rank {rank}] received {len(my_precursors)} precursors.", flush=True)
+
+    def perform_DORAnet_bio_1step(precursor_smiles: str):
+    """Generates one-step DORAnet products for a given precursor SMILES string."""
+
+    unique_id = str(uuid.uuid4())
+    unique_jobname = f'{precursor_smiles}_{unique_id}'
+
+    forward_network = enzymatic.generate_network(
+        job_name = unique_jobname,
+        starters = {precursor_smiles},
+        gen = 1,
+        direction = "forward")
+
+    generated_bioproducts_list = []
+
+    for mol in forward_network.mols:
+        generated_bioproduct_smiles = Chem.MolToSmiles(Chem.MolFromSmiles(mol.uid))
+
+        # Store only non-cofactor unique products
+        if generated_bioproduct_smiles and generated_bioproduct_smiles not in cofactors_list:
+            generated_bioproducts_list.append(generated_bioproduct_smiles)
+
+    return generated_bioproducts_list
