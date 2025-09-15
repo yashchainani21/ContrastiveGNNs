@@ -17,7 +17,7 @@ if __name__ == '__main__':
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    # define filepaths for PKS unbound PKS products
+    # define filepaths for unbound PKS products
     precursors_filepath = f'../data/interim/unbound_PKS_products_{max_extension_modules}_ext_mods_no_stereo.pkl'
     output_filepath = f'../data/interim/DORAnet_BIO{num_bio_steps}_from_PKS_products_{max_extension_modules}_ext_mods_no_stereo.txt'
 
