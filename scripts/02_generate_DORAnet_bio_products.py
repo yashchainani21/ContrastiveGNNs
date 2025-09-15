@@ -22,16 +22,14 @@ if __name__ == '__main__':
 
     # only rank 0 reads files and sets up initial data
     if rank == 0:
-
-        # read in unbound PKS product SMILES
         with open(precursors_filepath, 'rb') as precursors_file:
             unbound_PKS_products = pd.read_pickle(precursors_file)
             precursors_list = [smi for smi in unbound_PKS_products.values()]
+    else:
+        precursors_list = None  # <-- define it for all non-root ranks
 
     # broadcast the precursors list to all processes
-    precursors_list = comm.bcast(precursors_list, root = 0)
-
-    # define a helper function to evenly split the precursors list into n chunks
+    precursors_list = comm.bcast(precursors_list, root=0)
 
     # define a helper function to evenly split the precursors list into n chunks
     def chunkify(lst, n):
@@ -75,9 +73,6 @@ if __name__ == '__main__':
 
         for mol in forward_network.mols:
             generated_bioproduct_smiles = Chem.MolToSmiles(Chem.MolFromSmiles(mol.uid))
-
-            # Store only non-cofactor unique products
-            if generated_bioproduct_smiles and generated_bioproduct_smiles not in cofactors_list:
-                generated_bioproducts_list.append(generated_bioproduct_smiles)
+            generated_bioproducts_list.append(generated_bioproduct_smiles)
 
         return generated_bioproducts_list
