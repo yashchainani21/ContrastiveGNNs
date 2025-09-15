@@ -27,3 +27,33 @@ if __name__ == '__main__':
         with open(precursors_filepath, 'rb') as precursors_file:
             unbound_PKS_products = pd.read_pickle(precursors_file)
             precursors_list = [smi for smi in unbound_PKS_products.values()]
+
+    # broadcast the precursors list to all processes
+    precursors_list = comm.bcast(precursors_list, root = 0)
+
+    # define a helper function to evenly split the precursors list into n chunks
+
+    # define a helper function to evenly split the precursors list into n chunks
+    def chunkify(lst, n):
+        """Split lst into n (roughly) equal-sized chunks. Avoid creating empty chunks."""
+        n = min(n, len(lst))  # avoid creating more chunks than data
+        k, m = divmod(len(lst), n)
+        return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+
+    # scatter the data (only rank 0 prepares the chunks)
+    if rank == 0:
+        chunks = chunkify(precursors_list, size)
+        num_active_ranks = len(chunks)
+    else:
+        chunks = None
+
+    # broadcast num_active_ranks to all processes
+    num_active_ranks = comm.bcast(num_active_ranks if rank == 0 else None, root=0)
+
+    # Scatter to all ranks — unused ranks get empty lists
+    if rank < num_active_ranks:
+        my_precursors = comm.scatter(chunks, root=0)
+    else:
+        my_precursors = []
+
+    print(f"[Rank {rank}] received {len(my_precursors)} precursors.", flush=True)
