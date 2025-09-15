@@ -1,7 +1,7 @@
 import uuid
 from mpi4py import MPI
 from rdkit import Chem
-import doranet.modules.enzymatic as enzymatic
+import doranet.modules.synthetic as synthetic
 import pandas as pd
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
@@ -32,6 +32,11 @@ if __name__ == '__main__':
     # broadcast the precursors list to all processes
     precursors_list = comm.bcast(precursors_list, root=0)
 
+    # Helper SMILES to remove
+    helper_smiles_set = set((
+        "O", "O=O", "[H][H]", "O=C=O", "C=O", "[C-]#[O+]", "Br", "[Br][Br]", "CO", "C=C",
+        "O=S(O)O", "N", "O=S(=O)(O)O", "O=NO", "N#N", "O=[N+]([O-])O", "NO", "C#N", "S", "O=S=O"))
+
     # define a helper function to evenly split the precursors list into n chunks
     def chunkify(lst, n):
         """Split lst into n (roughly) equal-sized chunks. Avoid creating empty chunks."""
@@ -45,3 +50,39 @@ if __name__ == '__main__':
         num_active_ranks = len(chunks)
     else:
         chunks = None
+        num_active_ranks = None
+
+    # broadcast num_active_ranks to all processes
+    num_active_ranks = comm.bcast(num_active_ranks if rank == 0 else None, root=0)
+
+    # Scatter to all ranks — unused ranks get empty lists
+    if rank < num_active_ranks:
+        my_precursors = comm.scatter(chunks, root=0)
+    else:
+        my_precursors = []
+
+    print(f"[Rank {rank}] received {len(my_precursors)} precursors.", flush=True)
+
+    def perform_DORAnet_chem_1step(precursor_smiles: str):
+        """Generates one-step DORAnet products for a given precursor SMILES string."""
+        unique_id = str(uuid.uuid4())
+        unique_jobname = f'{precursor_smiles}_{unique_id}'
+
+        forward_network = synthetic.generate_network(
+            job_name=unique_jobname,
+            starters={precursor_smiles},
+            helpers=tuple(helper_smiles_set),
+            gen=1,
+            direction="forward"
+        )
+
+        generated_chem_products_list = []
+        for mol in forward_network.mols:
+            smiles = Chem.MolToSmiles(Chem.MolFromSmiles(mol.uid))
+            if smiles and smiles not in helper_smiles_set:
+                generated_chem_products_list.append(smiles)
+        return generated_chem_products_list
+
+
+
+    
