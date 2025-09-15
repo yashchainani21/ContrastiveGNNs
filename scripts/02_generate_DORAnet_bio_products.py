@@ -96,6 +96,6 @@ if __name__ == '__main__':
 
         print(f"\nTotal unique bioproducts generated: {len(combined_results)}\n", flush = True)
 
-    # save the results to the output file
-    with open(output_filepath, "w") as f:
-        f.write('\n'.join(combined_results))
+        # save the results to the output file
+        with open(output_filepath, "w") as f:
+            f.write('\n'.join(combined_results))
