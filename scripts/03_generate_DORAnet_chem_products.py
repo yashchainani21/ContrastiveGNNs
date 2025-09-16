@@ -83,6 +83,28 @@ if __name__ == '__main__':
                 generated_chem_products_list.append(smiles)
         return generated_chem_products_list
 
+    # Run modifications
+    my_results = []
+    for precursor in my_precursors:
+        my_results.append(perform_DORAnet_chem_1step(precursor))    
 
+    # flatten the results for this rank
+    my_results_flat = [item for sublist in my_results for item in sublist]
+
+    # gather all results to root
+    all_results = comm.gather(my_results_flat, root = 0)
+
+
+    if rank == 0:
+        combined_results = set()
+        for sublist in all_results:
+            combined_results.update(sublist)
+
+        # write results to file
+        with open(output_filepath, 'w') as output_file:
+            for smi in combined_results:
+                output_file.write(f"{smi}\n")
+
+        print(f"Total unique DORAnet CHEM{num_chem_steps} products generated: {len(combined_results)}")    
 
     
