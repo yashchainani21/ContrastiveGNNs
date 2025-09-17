@@ -69,17 +69,15 @@ if __name__ == "__main__":
         df_in = load_split_df(SPLIT)
         rows = list(df_in[["smiles", "source"]].itertuples(index=False, name=None))
         chunks = chunkify(rows, size)
-        num_active = len(chunks)
+        # Pad with empty chunks so length equals size (required by Scatter)
+        if len(chunks) < size:
+            chunks.extend([[] for _ in range(size - len(chunks))])
     else:
         df_in = None
         chunks = None
-        num_active = None
 
-    num_active = comm.bcast(num_active if rank == 0 else None, root=0)
-    if rank < num_active:
-        my_rows = comm.scatter(chunks, root=0)
-    else:
-        my_rows = []
+    # All ranks participate in Scatter with a list of length == size
+    my_rows = comm.scatter(chunks, root=0)
 
     print(f"[Rank {rank}] processing {len(my_rows)} rows", flush=True)
 
@@ -139,4 +137,3 @@ if __name__ == "__main__":
             out_csv = out_dir / f"baseline_{SPLIT}_ecfp4.csv"
             df_out.to_csv(out_csv, index=False)
             print(f"Parquet save failed ({e}); saved CSV to {out_csv}")
-
