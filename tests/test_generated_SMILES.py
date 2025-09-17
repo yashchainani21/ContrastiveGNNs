@@ -124,6 +124,20 @@ def _pks_ratio(path: Path) -> float:
     return float(pks) / float(total)
 
 
+def _pks_counts(path: Path):
+    if path.suffix == ".parquet":
+        df = pd.read_parquet(path)
+    else:
+        df = pd.read_csv(path)
+    if "source" not in df.columns:
+        raise AssertionError(f"'source' column not found in {path}")
+    total = len(df)
+    pks = int((df["source"].astype(str) == "PKS").sum())
+    nonpks = int(total - pks)
+    ratio = (pks / total) if total else 0.0
+    return pks, nonpks, total, ratio
+
+
 def test_pks_ratio_similarity_across_splits():
     """
     Check that the PKS fraction is similar across train/val/test.
@@ -140,7 +154,13 @@ def test_pks_ratio_similarity_across_splits():
     if missing:
         pytest.skip(f"Missing split files for: {', '.join(missing)}")
 
-    ratios = {s: _pks_ratio(p) for s, p in paths.items()}
+    # Compute and print ratios and counts for visibility
+    counts = {s: _pks_counts(p) for s, p in paths.items()}
+    ratios = {s: c[3] for s, c in counts.items()}
+
+    # Print a concise summary (use `-s` with pytest to always see prints)
+    for split, (pks, nonpks, total, ratio) in counts.items():
+        print(f"{split}: PKS ratio={ratio:.3f} (PKS={pks}, non-PKS={nonpks}, total={total})")
 
     # Tolerance in absolute proportion (e.g., 0.05 = 5 percentage points)
     tol = 0.05
