@@ -1,9 +1,10 @@
 from pathlib import Path
+from typing import Optional, Set
 import pandas as pd
 import pytest
 
 
-def _find_split_path(base: Path, split: str) -> Path | None:
+def _find_split_path(base: Path, split: str) -> Optional[Path]:
     # Prefer baseline split files
     p_parquet = base / split / f"baseline_{split}.parquet"
     p_csv = base / split / f"baseline_{split}.csv"
@@ -21,7 +22,7 @@ def _find_split_path(base: Path, split: str) -> Path | None:
     return None
 
 
-def _load_smiles_set(path: Path) -> set[str]:
+def _load_smiles_set(path: Path) -> Set[str]:
     if path.suffix == ".parquet":
         df = pd.read_parquet(path)
     else:
@@ -55,4 +56,3 @@ def test_no_smiles_leakage_across_splits():
     assert not inter_train_val, f"SMILES leakage between train and val: {list(sorted(inter_train_val))[:10]} (and more)"
     assert not inter_train_test, f"SMILES leakage between train and test: {list(sorted(inter_train_test))[:10]} (and more)"
     assert not inter_val_test, f"SMILES leakage between val and test: {list(sorted(inter_val_test))[:10]} (and more)"
-
