@@ -99,3 +99,57 @@ def test_no_stereo_characters_in_smiles():
 
     assert not errors, "\n".join(errors)
 
+
+def _find_split_with_source(base: Path, split: str) -> Optional[Path]:
+    # Prefer non-fingerprint first, then fingerprinted
+    for name in [f"baseline_{split}.parquet", f"baseline_{split}.csv",
+                 f"baseline_{split}_ecfp4.parquet", f"baseline_{split}_ecfp4.csv"]:
+        p = base / split / name
+        if p.exists():
+            return p
+    return None
+
+
+def _pks_ratio(path: Path) -> float:
+    if path.suffix == ".parquet":
+        df = pd.read_parquet(path)
+    else:
+        df = pd.read_csv(path)
+    if "source" not in df.columns:
+        raise AssertionError(f"'source' column not found in {path}")
+    total = len(df)
+    if total == 0:
+        return 0.0
+    pks = (df["source"].astype(str) == "PKS").sum()
+    return float(pks) / float(total)
+
+
+def test_pks_ratio_similarity_across_splits():
+    """
+    Check that the PKS fraction is similar across train/val/test.
+    Uses an absolute tolerance on the proportion difference.
+    """
+    project_root = Path(__file__).resolve().parents[1]
+    data_dir = project_root / "data"
+
+    paths = {
+        split: _find_split_with_source(data_dir, split)
+        for split in ("train", "val", "test")
+    }
+    missing = [s for s, p in paths.items() if p is None]
+    if missing:
+        pytest.skip(f"Missing split files for: {', '.join(missing)}")
+
+    ratios = {s: _pks_ratio(p) for s, p in paths.items()}
+
+    # Tolerance in absolute proportion (e.g., 0.05 = 5 percentage points)
+    tol = 0.05
+
+    pairs = [("train", "val"), ("train", "test"), ("val", "test")]
+    errors = []
+    for a, b in pairs:
+        diff = abs(ratios[a] - ratios[b])
+        if diff > tol:
+            errors.append(f"PKS ratio differs more than {tol:.2f} between {a} ({ratios[a]:.3f}) and {b} ({ratios[b]:.3f})")
+
+    assert not errors, "\n".join(errors)
