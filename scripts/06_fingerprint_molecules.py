@@ -97,51 +97,63 @@ if __name__ == "__main__":
 
     print(f"[Rank {rank}] completed. Dropped {dropped} invalid rows.", flush=True)
 
-    # Prepare serializable payload components
-    ok_bits_lists = [arr.tolist() for arr in ok_bits]
+    # Write shard per rank to avoid large gather messages
+    out_dir = Path("../data") / SPLIT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shard_parquet = out_dir / f"baseline_{SPLIT}_ecfp4.rank{rank}.parquet"
+    shard_csv = out_dir / f"baseline_{SPLIT}_ecfp4.rank{rank}.csv"
 
-    # Optional sync before collectives to help debugging
-    comm.Barrier()
-
-    # Gather components separately (more robust on some MPI stacks)
-    all_smiles_lists = comm.gather(ok_smiles, root=0)
-    all_sources_lists = comm.gather(ok_sources, root=0)
-    all_bits_nested = comm.gather(ok_bits_lists, root=0)
-
-    if rank == 0:
-        all_smiles: List[str] = []
-        all_sources: List[str] = []
-        all_bits_lists: List[List[int]] = []
-        for smi_list in all_smiles_lists:
-            all_smiles.extend(smi_list)
-        for src_list in all_sources_lists:
-            all_sources.extend(src_list)
-        for bits_list in all_bits_nested:
-            all_bits_lists.extend(bits_list)
-
-        if not all_smiles:
-            raise RuntimeError("No valid fingerprints were produced by any rank.")
-
-        # Build the final DataFrame with explicit bit columns
-        bit_array = np.array(all_bits_lists, dtype=np.uint8)
-        assert bit_array.shape[1] == N_BITS, f"Bit array has wrong width: {bit_array.shape}"
+    if ok_smiles:
+        bit_array = np.vstack(ok_bits).astype(np.uint8)
         cols = [f"fp_{i}" for i in range(N_BITS)]
         df_bits = pd.DataFrame(bit_array, columns=cols)
-        df_out = pd.DataFrame({
-            "smiles": all_smiles,
-            "source": all_sources,
+        df_shard = pd.DataFrame({
+            "smiles": ok_smiles,
+            "source": ok_sources,
         })
-        df_out = pd.concat([df_out, df_bits], axis=1)
-
-        # Save alongside the split
-        out_dir = Path("../data") / SPLIT
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"baseline_{SPLIT}_ecfp4.parquet"
+        df_shard = pd.concat([df_shard, df_bits], axis=1)
         try:
-            df_out.to_parquet(out_path, index=False)
-            print(f"Saved fingerprints to {out_path} ({len(df_out)} rows, {N_BITS} bits)")
+            df_shard.to_parquet(shard_parquet, index=False)
+            print(f"[Rank {rank}] wrote shard {shard_parquet} ({len(df_shard)} rows)")
         except Exception as e:
-            # Fallback CSV if parquet fails
-            out_csv = out_dir / f"baseline_{SPLIT}_ecfp4.csv"
-            df_out.to_csv(out_csv, index=False)
-            print(f"Parquet save failed ({e}); saved CSV to {out_csv}")
+            df_shard.to_csv(shard_csv, index=False)
+            print(f"[Rank {rank}] parquet failed ({e}); wrote CSV shard {shard_csv}")
+    else:
+        # Clean any stale shard from prior runs
+        try:
+            if shard_parquet.exists(): shard_parquet.unlink()
+            if shard_csv.exists(): shard_csv.unlink()
+        except Exception:
+            pass
+
+    # Synchronize ranks before merge
+    comm.Barrier()
+
+    if rank == 0:
+        # Try parquet shards first, else CSV shards
+        shard_paths = sorted(out_dir.glob(f"baseline_{SPLIT}_ecfp4.rank*.parquet"))
+        use_csv = False
+        if not shard_paths:
+            shard_paths = sorted(out_dir.glob(f"baseline_{SPLIT}_ecfp4.rank*.csv"))
+            use_csv = True
+        if not shard_paths:
+            raise RuntimeError("No shard files found to merge. Check worker logs.")
+
+        parts = []
+        for p in shard_paths:
+            try:
+                parts.append(pd.read_parquet(p) if not use_csv else pd.read_csv(p))
+            except Exception as e:
+                print(f"Skipping shard {p} due to read error: {e}")
+        if not parts:
+            raise RuntimeError("All shard reads failed; cannot assemble final dataframe.")
+
+        df_out = pd.concat(parts, ignore_index=True)
+        final_parquet = out_dir / f"baseline_{SPLIT}_ecfp4.parquet"
+        try:
+            df_out.to_parquet(final_parquet, index=False)
+            print(f"Merged {len(parts)} shards → {final_parquet} ({len(df_out)} rows)")
+        except Exception as e:
+            final_csv = out_dir / f"baseline_{SPLIT}_ecfp4.csv"
+            df_out.to_csv(final_csv, index=False)
+            print(f"Parquet merge failed ({e}); wrote CSV {final_csv}")
