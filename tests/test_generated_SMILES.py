@@ -58,6 +58,7 @@ def test_no_smiles_leakage_across_splits():
     assert not inter_train_test, f"SMILES leakage between train and test: {list(sorted(inter_train_test))[:10]} (and more)"
     assert not inter_val_test, f"SMILES leakage between val and test: {list(sorted(inter_val_test))[:10]} (and more)"
 
+
 def test_no_stereo_characters_in_smiles():
     """
     Ensure no stereochemical markers remain in SMILES across all splits.
@@ -97,3 +98,4 @@ def test_no_stereo_characters_in_smiles():
         pytest.skip("No split files found to check stereo characters")
 
     assert not errors, "\n".join(errors)
+
