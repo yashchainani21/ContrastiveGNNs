@@ -5,6 +5,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
+from collections import Counter
 
 
 def find_input_file() -> Path:
@@ -48,6 +49,11 @@ if __name__ == "__main__":
     y = encode_labels(df)
     X, fp_cols = extract_features(df)
 
+    # Inspect class balance and set class_weight accordingly
+    counts = Counter(y)
+    print(f"Class counts (0=non-PKS, 1=PKS): {dict(counts)}")
+    class_weight = "balanced"
+
     # Simple linear classifier; saga supports n_jobs for multinomial but also fine here.
     # Bits are 0/1 so no scaling required.
     clf = LogisticRegression(
@@ -56,7 +62,7 @@ if __name__ == "__main__":
         C=1.0,
         max_iter=2000,
         n_jobs=-1,
-        class_weight=None,  # set to 'balanced' if classes are highly imbalanced
+        class_weight=class_weight,
         random_state=42,
     )
     clf.fit(X, y)
@@ -73,6 +79,8 @@ if __name__ == "__main__":
         "label_mapping": {"PKS": 1, "bio/chem": 0},
         "train_rows": int(X.shape[0]),
         "train_path": str(in_path),
+        "class_weight": class_weight,
+        "class_counts": dict(counts),
     }, model_path)
 
     with open(meta_path, "w") as f:
@@ -82,8 +90,9 @@ if __name__ == "__main__":
             "train_rows": int(X.shape[0]),
             "train_path": str(in_path),
             "model_path": str(model_path),
-            "classifier": "LogisticRegression(saga, l2, C=1.0)",
+            "classifier": "LogisticRegression(saga, l2, C=1.0, class_weight=balanced)",
+            "class_weight": class_weight,
+            "class_counts": dict(counts),
         }, f, indent=2)
 
     print(f"Saved model to {model_path} and metadata to {meta_path}")
-
