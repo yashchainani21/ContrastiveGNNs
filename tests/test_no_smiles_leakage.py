@@ -40,7 +40,8 @@ def test_no_smiles_leakage_across_splits():
     val_path = _find_split_path(data_dir, "val")
     test_path = _find_split_path(data_dir, "test")
 
-    missing = [name for name, p in ("train", train_path), ("val", val_path), ("test", test_path) if p is None]
+    pairs = [("train", train_path), ("val", val_path), ("test", test_path)]
+    missing = [name for (name, p) in pairs if p is None]
     if missing:
         pytest.skip(f"Missing split files for: {', '.join(missing)}")
 
