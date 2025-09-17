@@ -97,18 +97,26 @@ if __name__ == "__main__":
 
     print(f"[Rank {rank}] completed. Dropped {dropped} invalid rows.", flush=True)
 
-    # Prepare serializable payload
-    payload = (ok_smiles, ok_sources, [arr.tolist() for arr in ok_bits])
+    # Prepare serializable payload components
+    ok_bits_lists = [arr.tolist() for arr in ok_bits]
 
-    gathered = comm.gather(payload, root=0)
+    # Optional sync before collectives to help debugging
+    comm.Barrier()
+
+    # Gather components separately (more robust on some MPI stacks)
+    all_smiles_lists = comm.gather(ok_smiles, root=0)
+    all_sources_lists = comm.gather(ok_sources, root=0)
+    all_bits_nested = comm.gather(ok_bits_lists, root=0)
 
     if rank == 0:
         all_smiles: List[str] = []
         all_sources: List[str] = []
         all_bits_lists: List[List[int]] = []
-        for smi_list, src_list, bits_list in gathered:
+        for smi_list in all_smiles_lists:
             all_smiles.extend(smi_list)
+        for src_list in all_sources_lists:
             all_sources.extend(src_list)
+        for bits_list in all_bits_nested:
             all_bits_lists.extend(bits_list)
 
         if not all_smiles:
