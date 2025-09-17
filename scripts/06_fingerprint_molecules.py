@@ -14,6 +14,10 @@ RDLogger.DisableLog('rdApp.*')
 
 # Choose which split to fingerprint: 'train', 'val', or 'test'
 SPLIT = 'train'
+"""Which split to fingerprint: 'train', 'val', or 'test'"""
+
+CLEANUP_SHARDS = True
+"""If True, remove per-rank shard files after merge on rank 0."""
 
 RADIUS = 2
 N_BITS = 2048
@@ -157,3 +161,14 @@ if __name__ == "__main__":
             final_csv = out_dir / f"baseline_{SPLIT}_ecfp4.csv"
             df_out.to_csv(final_csv, index=False)
             print(f"Parquet merge failed ({e}); wrote CSV {final_csv}")
+
+        # Cleanup shard files if requested
+        if CLEANUP_SHARDS:
+            removed = 0
+            for p in shard_paths:
+                try:
+                    p.unlink()
+                    removed += 1
+                except Exception as e:
+                    print(f"Warning: failed to remove shard {p}: {e}")
+            print(f"Cleanup: removed {removed} shard file(s)")
