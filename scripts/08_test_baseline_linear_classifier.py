@@ -3,7 +3,14 @@ import json
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, roc_auc_score, precision_recall_fscore_support, classification_report, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    roc_auc_score,
+    precision_recall_fscore_support,
+    classification_report,
+    confusion_matrix,
+    average_precision_score,
+)
 
 
 def find_input_file() -> Path:
@@ -64,6 +71,7 @@ if __name__ == "__main__":
     prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary", zero_division=0)
     cm = confusion_matrix(y_true, y_pred).tolist()
     auc = roc_auc_score(y_true, y_prob) if y_prob is not None else None
+    auprc = average_precision_score(y_true, y_prob) if y_prob is not None else None
 
     report = {
         "accuracy": acc,
@@ -71,6 +79,7 @@ if __name__ == "__main__":
         "recall": rec,
         "f1": f1,
         "roc_auc": auc,
+        "auprc": auprc,
         "confusion_matrix": cm,
         "n_samples": int(len(y_true)),
         "test_path": str(in_path),
@@ -84,4 +93,3 @@ if __name__ == "__main__":
     with open(out_dir / "baseline_linear_clf_test_report.json", "w") as f:
         json.dump(report, f, indent=2)
     print(f"Saved test report to {out_dir / 'baseline_linear_clf_test_report.json'}")
-
