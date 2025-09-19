@@ -29,6 +29,7 @@ import joblib
 import numpy as np
 import dask.dataframe as dd
 from dask.distributed import Client, LocalCluster
+import getpass
 from dask_ml.wrappers import Incremental
 from sklearn.linear_model import SGDClassifier
 
@@ -42,11 +43,25 @@ def connect_client() -> Client:
     if sched_file and Path(sched_file).exists():
         print(f"Connecting via scheduler file {sched_file}")
         return Client(scheduler_file=sched_file)
-    # Fallback: local cluster (multi-core)
+    # Fallback: local cluster (multi-core). Prefer node-local scratch for temp spills.
     n_workers = max(1, (os.cpu_count() or 2) - 1)
     threads_per_worker = 1
-    cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker)
-    print(f"Started LocalCluster at {cluster.dashboard_link} with {n_workers} workers")
+    local_dir = (
+        os.getenv("DASK_LOCAL_DIRECTORY")
+        or os.getenv("TMPDIR")
+        or f"/tmp/dask-{getpass.getuser()}"
+    )
+    Path(local_dir).mkdir(parents=True, exist_ok=True)
+    cluster = LocalCluster(
+        n_workers=n_workers,
+        threads_per_worker=threads_per_worker,
+        dashboard_address=":0",
+        local_directory=local_dir,
+    )
+    print(
+        f"Started LocalCluster at {cluster.dashboard_link} with {n_workers} workers; "
+        f"local_directory={local_dir}"
+    )
     return Client(cluster)
 
 
