@@ -19,8 +19,11 @@ Run on multi-node (one option):
     python scripts/07_01_train_distributed_baseline_classifier.py
 """
 
+# Bypass RAPIDS dask import shim when GPUs aren't used
+import os as _os
+_os.environ.setdefault("RAPIDS_NO_INITIALIZE", "1")
+
 from pathlib import Path
-import os
 import json
 import joblib
 import numpy as np
@@ -137,4 +140,3 @@ if __name__ == "__main__":
         }, f, indent=2)
 
     print(f"Saved distributed model to {model_path} and metadata to {meta_path}")
-
