@@ -80,7 +80,7 @@ if __name__ == "__main__":
         "train_rows": int(X.shape[0]),
         "train_path": str(in_path),
         "class_weight": class_weight,
-        "class_counts": dict(counts),
+        "class_counts": {int(k): int(v) for k, v in counts.items()},
     }, model_path)
 
     with open(meta_path, "w") as f:
@@ -92,7 +92,7 @@ if __name__ == "__main__":
             "model_path": str(model_path),
             "classifier": "LogisticRegression(saga, l2, C=1.0, class_weight=balanced)",
             "class_weight": class_weight,
-            "class_counts": dict(counts),
+            "class_counts": {str(int(k)): int(v) for k, v in counts.items()},
         }, f, indent=2)
 
     print(f"Saved model to {model_path} and metadata to {meta_path}")
