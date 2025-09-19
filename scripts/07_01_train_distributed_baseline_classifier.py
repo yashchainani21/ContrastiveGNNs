@@ -20,8 +20,8 @@ Run on multi-node (one option):
 """
 
 # Bypass RAPIDS dask import shim when GPUs aren't used
-import os as _os
-_os.environ.setdefault("RAPIDS_NO_INITIALIZE", "1")
+import os
+os.environ.setdefault("RAPIDS_NO_INITIALIZE", "1")
 
 from pathlib import Path
 import json
