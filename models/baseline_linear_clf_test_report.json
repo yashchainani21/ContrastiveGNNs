@@ -1,0 +1,21 @@
+{
+  "accuracy": 0.9559355719031799,
+  "precision": 0.0663546979336453,
+  "recall": 0.9481592787377912,
+  "f1": 0.12402948402948404,
+  "roc_auc": 0.9821611782023556,
+  "auprc": 0.09182087561854455,
+  "confusion_matrix": [
+    [
+      385456,
+      17757
+    ],
+    [
+      69,
+      1262
+    ]
+  ],
+  "n_samples": 404544,
+  "test_path": "../data/test/baseline_test_ecfp4.parquet",
+  "model_path": "../models/baseline_linear_clf.pkl"
+}
