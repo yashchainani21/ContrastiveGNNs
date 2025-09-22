@@ -46,4 +46,9 @@ X = df_all[fp_cols].to_numpy(dtype=np.float32)
 y = (df_all['source'].astype(str) == 'PKS').astype(int).to_numpy()
 df_plot = df_all.copy().reset_index(drop=True)
 
+X_embedded = TSNE(n_components=2, perplexity=15, learning_rate=10).fit_transform(X)
+df_plot['tsne_1'] = X_embedded[:, 0]
+df_plot['tsne_2'] = X_embedded[:, 1]
+
+df_plot.to_parquet('../data/processed/all_PKS_and_non_PKS_molecules_3_BIO1_CHEM1_no_stereo_tSNE_embeddings.parquet', index=False)
 
