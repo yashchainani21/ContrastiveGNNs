@@ -39,3 +39,11 @@ for s, p in paths.items():
 
 df_all = pd.concat(dfs, ignore_index=True)
 
+# Prepare features and labels (no subsampling)
+fp_cols = [c for c in df_all.columns if str(c).startswith('fp_')]
+fp_cols = sorted(fp_cols, key=lambda s: int(str(s).split('_')[1]))
+X = df_all[fp_cols].to_numpy(dtype=np.float32)
+y = (df_all['source'].astype(str) == 'PKS').astype(int).to_numpy()
+df_plot = df_all.copy().reset_index(drop=True)
+
+
