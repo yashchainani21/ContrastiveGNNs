@@ -77,18 +77,31 @@ if __name__ == "__main__":
         if n >= 200000:
             build_kwds.update({"nnd_do_batch": True, "nnd_n_clusters": 4})
 
-        umap = UMAP_GPU(
-            n_neighbors=n_neighbors,
-            n_components=n_components,
-            min_dist=min_dist,
-            build_algo=build_algo,
-            build_kwds=build_kwds,
-            random_state=42,
-            verbose=True,
-        )
-        # Feed host data explicitly for large datasets
-        data_on_host = n >= 50000
-        emb = umap.fit_transform(X, data_on_host=data_on_host)
+        try:
+            umap = UMAP_GPU(
+                n_neighbors=n_neighbors,
+                n_components=n_components,
+                min_dist=min_dist,
+                build_algo=build_algo,
+                build_kwds=build_kwds,
+                random_state=42,
+                verbose=True,
+            )
+            # Feed host data explicitly for large datasets
+            data_on_host = n >= 50000
+            emb = umap.fit_transform(X, data_on_host=data_on_host)
+        except Exception as e:
+            print("cuML UMAP failed (likely CUDA/CuPy toolchain issue):", repr(e))
+            print("Falling back to CPU umap-learn…")
+            from umap import UMAP as UMAP_CPU
+            umap = UMAP_CPU(
+                n_neighbors=n_neighbors,
+                n_components=n_components,
+                min_dist=min_dist,
+                random_state=42,
+                verbose=True,
+            )
+            emb = umap.fit_transform(X)
     else:
         # CPU umap-learn fallback
         umap = UMAP_CPU(
