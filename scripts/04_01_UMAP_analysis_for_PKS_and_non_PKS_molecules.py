@@ -125,20 +125,24 @@ if __name__ == "__main__":
     print(f"Saved embeddings to {out_parquet}")
 
     # Plot
-    plt.figure(figsize=(8, 6))
+    # High-visibility palette and styling
+    sns.set_style("white")
+    plt.figure(figsize=(9, 7), facecolor="white")
+    palette = {"PKS": "#0C7BDC", "non-PKS": "#D62728"}  # bright blue vs red
     sns.scatterplot(
         data=df_all.sample(min(200000, len(df_all)), random_state=42),
         x="umap_1",
         y="umap_2",
         hue="is_pks",
-        palette={"PKS": "#1f77b4", "non-PKS": "#ff7f0e"},
-        alpha=0.5,
-        s=8,
+        palette=palette,
+        alpha=0.7,
+        s=12,
         linewidth=0,
+        rasterized=True,
     )
-    plt.title("UMAP of ECFP4 fingerprints: PKS vs non-PKS")
+    plt.title("UMAP of ECFP4 fingerprints: PKS vs non-PKS", fontsize=13)
     plt.legend(title="label", markerscale=2)
     plt.tight_layout()
     out_png = data_dir / "processed" / "pks_nonpks_umap.png"
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_png, dpi=300)
     print(f"Saved plot to {out_png}")
