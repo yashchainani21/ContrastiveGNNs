@@ -6,6 +6,7 @@ from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -127,10 +128,24 @@ def main():
     val_ds = FingerprintDataset(df_val, fp_cols)
     test_ds = FingerprintDataset(df_test, fp_cols)
 
+    # Choose conservative DataLoader worker count to avoid warnings on constrained systems
+    def _suggest_workers(default: int) -> int:
+        try:
+            sct = int(os.environ.get("SLURM_CPUS_PER_TASK", "0"))
+            if sct > 0:
+                return max(1, min(default, sct // 2))
+        except Exception:
+            pass
+        # Fallback to 1 to prevent oversubscription warnings
+        return 1
+
     batch_size = 4096 if device.type == "cuda" else 1024
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=(device.type=="cuda"))
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=(device.type=="cuda"))
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=(device.type=="cuda"))
+    nw_train = _suggest_workers(4)
+    nw_eval = _suggest_workers(2)
+    pin = device.type == "cuda"
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=nw_train, pin_memory=pin)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=nw_eval, pin_memory=pin)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=nw_eval, pin_memory=pin)
 
     # Model
     input_dim = len(fp_cols)
@@ -161,7 +176,8 @@ def main():
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+            # Use new autocast API to avoid deprecation warnings
+            with torch.amp.autocast(device_type="cuda", enabled=(device.type == "cuda")):
                 logits = model(xb)
                 loss = criterion(logits, yb)
             scaler.scale(loss).backward()
