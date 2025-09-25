@@ -116,11 +116,7 @@ def main():
     df_test = load_split("test")
     fp_cols = get_fp_columns(df_train)
 
-    # Optional: cap training set size to speed up initial bring-up
-    TRAIN_LIMIT = 50_000
-    if len(df_train) > TRAIN_LIMIT:
-        df_train = df_train.iloc[:TRAIN_LIMIT].copy()
-        print(f"Capped training set to first {TRAIN_LIMIT:,} rows (was {len(load_split('train')):,})")
+    # Train on all available training rows
 
     # Datasets and loaders
     train_ds = FingerprintDataset(df_train, fp_cols)
