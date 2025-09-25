@@ -55,15 +55,15 @@ def _init_worker(X_train: np.ndarray, train_counts: np.ndarray, train_labels: np
     _train_smiles = train_smiles
 
 
-def _predict_nn_for_indices(args: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]):
-    idxs, X_test_chunk, y_test_chunk, smiles_test_chunk = args
+def _predict_nn_for_indices(args: Tuple[np.ndarray, np.ndarray]):
+    idxs, X_test_chunk = args
     preds = np.zeros(len(idxs), dtype=np.int8)
     sims = np.zeros(len(idxs), dtype=np.float32)
     nn_smiles = []
 
     # Compute similarity to all train entries using dot products
     # X_train: (N_train, d) uint8; test: (d,) uint8
-    for i, (x, _) in enumerate(zip(X_test_chunk, y_test_chunk)):
+    for i, x in enumerate(X_test_chunk):
         test_bits = x.astype(np.uint8)
         inter = _X_train.dot(test_bits.astype(np.int32))  # (N_train,)
         test_count = int(test_bits.sum())
@@ -88,7 +88,7 @@ def main():
     # Optional caps for speed (set env SIM_TRAIN_LIMIT / SIM_TEST_LIMIT)
     # Default: cap BOTH train and test to 10,000 rows for quick checks
     train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "10000")) or None
-    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "10000")) or None
+    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "15000")) or None
 
     if train_limit and len(df_train) > train_limit:
         df_train = df_train.iloc[:train_limit].copy()
@@ -122,15 +122,24 @@ def main():
     sims = np.zeros(N, dtype=np.float32)
     nn_smiles_all = [None] * N
 
-    # Use spawn-safe context
-    ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=processes, initializer=_init_worker, initargs=(X_train, train_counts, y_train, smiles_train)) as pool:
+    # Prefer 'fork' to avoid copying large arrays; fallback to 'spawn' with fewer processes
+    try:
+        ctx = mp.get_context("fork")
+    except ValueError:
+        ctx = mp.get_context("spawn")
+
+    # Set globals before forking so children inherit without pickling
+    global _X_train, _train_counts, _train_labels, _train_smiles
+    _X_train = X_train
+    _train_counts = train_counts
+    _train_labels = y_train
+    _train_smiles = smiles_train
+
+    with ctx.Pool(processes=processes) as pool:
         tasks = []
         for idx_chunk in chunks:
             X_chunk = X_test[idx_chunk]
-            y_chunk = y_test[idx_chunk]
-            smiles_chunk = smiles_test[idx_chunk]
-            tasks.append((idx_chunk, X_chunk, y_chunk, smiles_chunk))
+            tasks.append((idx_chunk, X_chunk))
 
         for idxs, preds_chunk, sims_chunk, nn_smiles in pool.imap_unordered(_predict_nn_for_indices, tasks):
             preds[idxs] = preds_chunk
