@@ -86,9 +86,9 @@ def main():
     fp_cols = get_fp_columns(df_train)
 
     # Optional caps for speed (set env SIM_TRAIN_LIMIT / SIM_TEST_LIMIT)
-    train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "0")) or None
-    # Default to a small test cap (5,000) for quick sanity checks; override with SIM_TEST_LIMIT
-    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "5000")) or None
+    # Default: cap training to 5,000 rows; use full test set
+    train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "5000")) or None
+    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "0")) or None
 
     if train_limit and len(df_train) > train_limit:
         df_train = df_train.iloc[:train_limit].copy()
