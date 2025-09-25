@@ -143,6 +143,6 @@ if __name__ == "__main__":
     plt.title("UMAP of ECFP4 fingerprints: PKS vs non-PKS", fontsize=13)
     plt.legend(title="label", markerscale=2)
     plt.tight_layout()
-    out_png = data_dir / "processed" / "pks_nonpks_umap.png"
+    out_png = Path("../plots") / "pks_nonpks_umap.png"
     plt.savefig(out_png, dpi=300)
     print(f"Saved plot to {out_png}")
