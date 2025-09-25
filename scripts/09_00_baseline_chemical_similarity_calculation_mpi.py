@@ -51,9 +51,9 @@ if __name__ == "__main__":
     fp_cols = get_fp_columns(df_train)
 
     # Optional caps via env to control workload
-    # Default: cap BOTH train and test to 1,000 rows for quick checks
-    train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "1000")) or None
-    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "1000")) or None
+    # Default: cap BOTH train and test to 10,000 rows for quick checks
+    train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "10000")) or None
+    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "10000")) or None
     if train_limit and len(df_train) > train_limit:
         df_train = df_train.iloc[:train_limit].copy()
         if rank == 0:
