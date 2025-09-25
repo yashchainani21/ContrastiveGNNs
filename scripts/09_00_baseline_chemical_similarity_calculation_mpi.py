@@ -52,7 +52,8 @@ if __name__ == "__main__":
 
     # Optional caps via env to control workload
     train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "0")) or None
-    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "0")) or None
+    # Default to a small test cap (5,000) for quick sanity checks; override with SIM_TEST_LIMIT
+    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "5000")) or None
     if train_limit and len(df_train) > train_limit:
         df_train = df_train.iloc[:train_limit].copy()
         if rank == 0:
@@ -139,4 +140,3 @@ if __name__ == "__main__":
         merged.drop(columns=["index"], inplace=True)
         merged.to_parquet(final_path, index=False)
         print(f"Saved merged results to {final_path}")
-
