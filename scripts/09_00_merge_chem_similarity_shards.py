@@ -55,6 +55,32 @@ def main():
     merged.to_parquet(final_path, index=False)
     print(f"Saved merged results to {final_path}")
 
+    # Also write metrics JSON to models folder for tracking
+    models_dir = Path("../models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    metrics_name = (
+        "mcs_similarity_nn_baseline_metrics.json"
+        if "mcs_" in args.glob
+        else "chem_similarity_nn_baseline_metrics.json"
+    )
+    metrics_path = models_dir / metrics_name
+    def _clean(x):
+        try:
+            return None if (isinstance(x, float) and (x != x)) else float(x)
+        except Exception:
+            return None
+    import json
+    with open(metrics_path, "w") as f:
+        json.dump({
+            "acc": _clean(acc),
+            "auroc": _clean(auroc),
+            "auprc": _clean(auprc),
+            "n_rows": int(len(merged)),
+            "n_pos": int(int((merged["true_label"] == "PKS").sum())),
+            "source": metrics_name.replace("_metrics.json", ""),
+        }, f, indent=2)
+    print(f"Saved metrics to {metrics_path}")
+
     # Cleanup: remove all per-rank shard files for both chem and MCS baselines
     removed = 0
     for pat in ("chem_similarity_nn_baseline*", "mcs_similarity_nn_baseline*"):
