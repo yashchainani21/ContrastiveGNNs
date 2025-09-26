@@ -9,7 +9,7 @@ def main():
     parser = argparse.ArgumentParser(description="Merge per-rank similarity shards and compute metrics.")
     parser.add_argument(
         "--glob",
-        default="chem_similarity_nn_baseline_mpi.rank*.parquet",
+        default="mcs_similarity_nn_baseline_mpi.rank*.parquet",
         help="Glob pattern of shard files to merge (e.g., 'chem_similarity_nn_baseline_mpi.rank*.parquet' or 'mcs_similarity_nn_baseline_mpi.rank*.parquet')",
     )
     args = parser.parse_args()
