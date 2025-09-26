@@ -14,17 +14,16 @@ RDLogger.DisableLog('rdApp.*')
 
 
 def find_split_file(split: str) -> Path:
+    """Return the non-fingerprint baseline split file (parquet preferred)."""
     base = Path("../data") / split
     for name in (
-        f"baseline_{split}_ecfp4.parquet",
-        f"baseline_{split}_ecfp4.csv",
         f"baseline_{split}.parquet",
         f"baseline_{split}.csv",
     ):
         p = base / name
         if p.exists():
             return p
-    raise FileNotFoundError(f"Could not find split file for '{split}' under {base}")
+    raise FileNotFoundError(f"Could not find non-ECFP split for '{split}' under {base}")
 
 
 def load_split(split: str) -> pd.DataFrame:
@@ -150,4 +149,3 @@ if __name__ == "__main__":
 
     if rank == 0:
         print("Rank 0: Skipping in-job merge for resilience. Use a merge script to combine shards later.")
-
