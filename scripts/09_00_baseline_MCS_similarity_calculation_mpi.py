@@ -65,18 +65,9 @@ if __name__ == "__main__":
         if rank == 0:
             print(f"Capped test to {test_limit:,} rows")
 
-    # Build molecules; drop invalids
+    # Keep train as SMILES + labels only (avoid holding all Mol objects in memory)
     train_smiles = df_train["smiles"].astype(str).to_numpy()
     y_train = (df_train["source"].astype(str) == "PKS").astype(np.int8).to_numpy()
-    train_mols = []
-    keep_idx = []
-    for i, smi in enumerate(train_smiles):
-        m = smiles_to_mol(smi)
-        if m is not None:
-            train_mols.append(m)
-            keep_idx.append(i)
-    train_smiles = train_smiles[keep_idx]
-    y_train = y_train[keep_idx]
 
     test_smiles = df_test["smiles"].astype(str).to_numpy()
     y_test = (df_test["source"].astype(str) == "PKS").astype(np.int8).to_numpy()
@@ -93,13 +84,14 @@ if __name__ == "__main__":
     # Split test indices across ranks
     N = len(test_mols)
     if rank == 0:
-        print(f"MPI ranks={size} | Train: {len(train_mols):,} | Test: {N:,}")
+        print(f"MPI ranks={size} | Train: {len(train_smiles):,} | Test: {N:,}")
     indices = np.array_split(np.arange(N, dtype=np.int64), size)[rank]
     print(f"[Rank {rank}] processing {len(indices)} test molecules", flush=True)
 
     # MCS parameters
     timeout = float(os.environ.get("MCS_TIMEOUT", "1.0"))
     bond_cmp = Chem.rdFMCS.BondCompare.CompareOrderExact
+    block_size = int(os.environ.get("MCS_TRAIN_BLOCK", "2000"))  # convert at most this many train mols at a time
 
     # For each assigned test mol, find most similar train by MCS score
     preds = np.zeros(len(indices), dtype=np.int8)
@@ -111,26 +103,44 @@ if __name__ == "__main__":
         na = tm.GetNumAtoms()
         best_s = -1.0
         best_j = -1
-        for j, trm in enumerate(train_mols):
-            nb = trm.GetNumAtoms()
-            try:
-                res = rdFMCS.FindMCS([trm, tm], timeout=timeout, matchValences=True,
-                                      matchChiralTag=False, bondCompare=bond_cmp)
-                if res.canceled:
+        # iterate train in blocks to bound memory usage
+        for start in range(0, len(train_smiles), block_size):
+            end = min(start + block_size, len(train_smiles))
+            block_smis = train_smiles[start:end]
+            # convert block to mols; skip invalid
+            block_mols = []
+            block_map = []
+            for j_rel, smi in enumerate(block_smis):
+                m = smiles_to_mol(smi)
+                if m is not None:
+                    block_mols.append(m)
+                    block_map.append(start + j_rel)
+            # compute MCS vs block
+            for j_rel, trm in enumerate(block_mols):
+                nb = trm.GetNumAtoms()
+                try:
+                    res = rdFMCS.FindMCS([trm, tm], timeout=timeout, matchValences=True,
+                                          matchChiralTag=False, bondCompare=bond_cmp)
+                    if res.canceled:
+                        s = 0.0
+                    else:
+                        common = float(res.numAtoms)
+                        denom = float(na + nb - res.numAtoms)
+                        s = common / denom if denom > 0 else 0.0
+                except Exception:
                     s = 0.0
-                else:
-                    common = float(res.numAtoms)
-                    denom = float(na + nb - res.numAtoms)
-                    s = common / denom if denom > 0 else 0.0
-            except Exception:
-                s = 0.0
-            if s > best_s:
-                best_s = s
-                best_j = j
+                if s > best_s:
+                    best_s = s
+                    best_j = block_map[j_rel]
 
-        preds[i] = y_train[best_j]
-        scores[i] = best_s
-        nn_smiles.append(train_smiles[best_j])
+        if best_j < 0:
+            preds[i] = 0
+            scores[i] = 0.0
+            nn_smiles.append("")
+        else:
+            preds[i] = y_train[best_j]
+            scores[i] = best_s
+            nn_smiles.append(train_smiles[best_j])
 
     # Write per-rank shard; avoid collectives for resilience
     out_dir = Path("../data/processed")
