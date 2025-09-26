@@ -53,9 +53,9 @@ if __name__ == "__main__":
     df_train = load_split("train")
     df_test = load_split("test")
 
-    # Default caps for safety; override with env vars
-    train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "1000")) or None
-    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "1000")) or None
+    # Default: no caps — run on all molecules (override with env vars if needed)
+    train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "0")) or None
+    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "0")) or None
     if train_limit and len(df_train) > train_limit:
         df_train = df_train.iloc[:train_limit].copy()
         if rank == 0:
