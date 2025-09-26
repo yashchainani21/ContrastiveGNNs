@@ -114,29 +114,10 @@ if __name__ == "__main__":
     out_df.to_parquet(shard, index=False)
     print(f"[Rank {rank}] wrote {len(out_df)} rows to {shard}")
 
-    comm.Barrier()
-
+    # NOTE: Do not use collectives (e.g., Barrier or Gather). If any rank fails,
+    # the communicator often becomes unusable and the job aborts. By writing
+    # per-rank shards eagerly, partial progress is preserved even on node failure.
+    # Use the standalone merge script to combine available shards afterwards.
     if rank == 0:
-        # Merge shards
-        shards = sorted(out_dir.glob("chem_similarity_nn_baseline_mpi.rank*.parquet"))
-        parts = [pd.read_parquet(p) for p in shards]
-        merged = pd.concat(parts, ignore_index=True).sort_values("index")
-
-        # Compute metrics on merged
-        y_true = (merged["true_label"] == "PKS").astype(np.int8).to_numpy()
-        y_pred = (merged["pred_label"] == "PKS").astype(np.int8).to_numpy()
-        acc = accuracy_score(y_true, y_pred)
-        try:
-            auroc = roc_auc_score(y_true, y_pred)
-        except Exception:
-            auroc = float("nan")
-        try:
-            auprc = average_precision_score(y_true, y_pred)
-        except Exception:
-            auprc = float("nan")
-        print(f"Chemical NN baseline (MPI) — ACC={acc:.4f} | AUROC={auroc:.4f} | AUPRC={auprc:.4f}")
-
-        final_path = out_dir / "chem_similarity_nn_baseline_mpi.parquet"
-        merged.drop(columns=["index"], inplace=True)
-        merged.to_parquet(final_path, index=False)
-        print(f"Saved merged results to {final_path}")
+        print("Rank 0: Skipping in-job merge to be resilient to rank failures.")
+        print("Use scripts/09_00_merge_chem_similarity_shards.py to merge existing shards later.")
