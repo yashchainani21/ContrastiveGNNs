@@ -69,6 +69,5 @@ def main():
                 print(f"Warning: failed to remove {p}: {e}")
     print(f"Cleanup: removed {removed} shard file(s)")
 
-
 if __name__ == "__main__":
     main()
