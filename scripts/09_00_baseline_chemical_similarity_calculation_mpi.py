@@ -79,7 +79,8 @@ if __name__ == "__main__":
     # Precompute bit counts per train row
     train_counts = LUT[X_train_packed].sum(axis=1).astype(np.int32)
 
-    N = len(X_test)
+    # Use the correct test array (bit-packed input names changed above)
+    N = len(X_test_bits)
     if rank == 0:
         print(f"MPI ranks={size} | Train: {len(X_train):,} | Test: {N:,} | Dim: {X_train.shape[1]}")
 
