@@ -63,15 +63,21 @@ if __name__ == "__main__":
         if rank == 0:
             print(f"Capped test to {test_limit:,} rows")
 
-    # Prepare arrays
-    X_train = df_train[fp_cols].to_numpy(dtype=np.uint8)
+    # Prepare arrays (bit-packed for memory-efficient popcount)
+    X_train_bits = df_train[fp_cols].to_numpy(dtype=np.uint8)
     y_train = (df_train["source"].astype(str) == "PKS").astype(np.int8).to_numpy()
     smiles_train = df_train["smiles"].astype(str).to_numpy()
-    train_counts = X_train.sum(axis=1).astype(np.int32)
 
-    X_test = df_test[fp_cols].to_numpy(dtype=np.uint8)
+    X_test_bits = df_test[fp_cols].to_numpy(dtype=np.uint8)
     y_test = (df_test["source"].astype(str) == "PKS").astype(np.int8).to_numpy()
     smiles_test = df_test["smiles"].astype(str).to_numpy()
+
+    # Lookup table for popcount(0..255)
+    LUT = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+    # Pack bits along feature axis to reduce memory 8x
+    X_train_packed = np.packbits(X_train_bits, axis=1)
+    # Precompute bit counts per train row
+    train_counts = LUT[X_train_packed].sum(axis=1).astype(np.int32)
 
     N = len(X_test)
     if rank == 0:
@@ -87,17 +93,32 @@ if __name__ == "__main__":
     sims = np.zeros(my_n, dtype=np.float32)
     nn_smiles = []
 
+    # Blocked nearest-neighbor search using packed bits and LUT popcount
+    BLOCK = int(os.environ.get("SIM_TRAIN_BLOCK", "100000"))  # rows per train block
+    n_train = X_train_packed.shape[0]
     for i, k in enumerate(indices):
-        test_bits = X_test[k].astype(np.uint8)
-        inter = X_train.dot(test_bits.astype(np.int32))  # (N_train,)
-        tcount = int(test_bits.sum())
-        union = train_counts + tcount - inter
-        union = np.maximum(union, 1)
-        tanimoto = inter / union
-        j = int(np.argmax(tanimoto))
-        preds[i] = y_train[j]
-        sims[i] = float(tanimoto[j])
-        nn_smiles.append(smiles_train[j])
+        test_bits = X_test_bits[k].astype(np.uint8)
+        test_packed = np.packbits(test_bits)
+        tcount = int(LUT[test_packed].sum())
+
+        best_sim = -1.0
+        best_j = -1
+        # Iterate over train in blocks to bound memory
+        for start in range(0, n_train, BLOCK):
+            end = min(start + BLOCK, n_train)
+            block_and = X_train_packed[start:end] & test_packed  # (B, packed_dim)
+            inter_block = LUT[block_and].sum(axis=1).astype(np.int32)  # (B,)
+            union_block = train_counts[start:end] + tcount - inter_block
+            union_block = np.maximum(union_block, 1)
+            tanimoto_block = inter_block / union_block
+            j_local = int(np.argmax(tanimoto_block))
+            if tanimoto_block[j_local] > best_sim:
+                best_sim = float(tanimoto_block[j_local])
+                best_j = start + j_local
+
+        preds[i] = y_train[best_j]
+        sims[i] = best_sim
+        nn_smiles.append(smiles_train[best_j])
 
     # Write per-rank shard to avoid large gathers
     out_dir = Path("../data/processed")
