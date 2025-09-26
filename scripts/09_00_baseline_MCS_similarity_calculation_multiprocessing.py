@@ -67,6 +67,11 @@ def _predict_nn_for_indices(args: Tuple[np.ndarray, List[Chem.Mol]]):
     scores = np.zeros(len(idxs), dtype=np.float32)
     nn_smiles: List[str] = []
 
+    # Resolve globals (avoid ambiguous truth-value checks on numpy arrays)
+    train_mols = _train_mols or []
+    train_labels = _train_labels if _train_labels is not None else np.array([0], dtype=np.int8)
+    train_smiles = _train_smiles if _train_smiles is not None else np.array([""], dtype=object)
+
     for i, tm in enumerate(test_mols_chunk):
         if tm is None:
             preds[i] = 0
@@ -76,7 +81,7 @@ def _predict_nn_for_indices(args: Tuple[np.ndarray, List[Chem.Mol]]):
         na = tm.GetNumAtoms()
         best_s = -1.0
         best_j = -1
-        for j, trm in enumerate(_train_mols or []):
+        for j, trm in enumerate(train_mols):
             if trm is None:
                 continue
             nb = trm.GetNumAtoms()
@@ -95,9 +100,9 @@ def _predict_nn_for_indices(args: Tuple[np.ndarray, List[Chem.Mol]]):
                 best_s = s
                 best_j = j
 
-        preds[i] = int((_train_labels or np.array([0]))[best_j]) if best_j >= 0 else 0
+        preds[i] = int(train_labels[best_j]) if best_j >= 0 else 0
         scores[i] = best_s if best_j >= 0 else 0.0
-        nn_smiles.append(((_train_smiles or np.array([""]))[best_j]) if best_j >= 0 else "")
+        nn_smiles.append(train_smiles[best_j] if best_j >= 0 else "")
 
     return idxs, preds, scores, nn_smiles
 
@@ -226,4 +231,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
