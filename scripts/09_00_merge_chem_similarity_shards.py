@@ -55,6 +55,20 @@ def main():
     merged.to_parquet(final_path, index=False)
     print(f"Saved merged results to {final_path}")
 
+    # Cleanup: remove all per-rank shard files for both chem and MCS baselines
+    removed = 0
+    for pat in ("chem_similarity_nn_baseline*", "mcs_similarity_nn_baseline*"):
+        for p in out_dir.glob(pat):
+            # keep the final merged files
+            if p.name in {"chem_similarity_nn_baseline_mpi.parquet", "mcs_similarity_nn_baseline_mpi.parquet"}:
+                continue
+            try:
+                p.unlink()
+                removed += 1
+            except Exception as e:
+                print(f"Warning: failed to remove {p}: {e}")
+    print(f"Cleanup: removed {removed} shard file(s)")
+
 
 if __name__ == "__main__":
     main()
