@@ -81,19 +81,20 @@ def main():
         }, f, indent=2)
     print(f"Saved metrics to {metrics_path}")
 
-    # Cleanup: remove all per-rank shard files for both chem and MCS baselines
+    # Cleanup: remove only per-rank shard files, keep merged parquet and metrics JSON
     removed = 0
-    for pat in ("chem_similarity_nn_baseline*", "mcs_similarity_nn_baseline*"):
+    shard_patterns = (
+        "chem_similarity_nn_baseline_mpi.rank*.parquet",
+        "mcs_similarity_nn_baseline_mpi.rank*.parquet",
+    )
+    for pat in shard_patterns:
         for p in out_dir.glob(pat):
-            # keep the final merged files
-            if p.name in {"chem_similarity_nn_baseline_mpi.parquet", "mcs_similarity_nn_baseline_mpi.parquet"}:
-                continue
             try:
                 p.unlink()
                 removed += 1
             except Exception as e:
                 print(f"Warning: failed to remove {p}: {e}")
-    print(f"Cleanup: removed {removed} shard file(s)")
+    print(f"Cleanup: removed {removed} shard file(s) matching rank patterns")
 
 if __name__ == "__main__":
     main()
