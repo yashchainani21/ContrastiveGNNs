@@ -112,9 +112,9 @@ def main():
     df_train = load_split("train")
     df_test = load_split("test")
 
-    # Default caps; override with env
-    train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "1000")) or None
-    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "1000")) or None
+    # Default: no caps; override with env if needed
+    train_limit = int(os.environ.get("SIM_TRAIN_LIMIT", "0")) or None
+    test_limit = int(os.environ.get("SIM_TEST_LIMIT", "0")) or None
     if train_limit and len(df_train) > train_limit:
         df_train = df_train.iloc[:train_limit].copy()
         print(f"Capped train to {train_limit:,} rows")
