@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import json
 from typing import List, Tuple
 
 import numpy as np
@@ -172,6 +173,20 @@ def main():
     })
     out_df.to_parquet(out_path, index=False)
     print(f"Saved per-molecule results to {out_path}")
+
+    # Also save summary metrics to models folder (e.g., for tracking baselines)
+    models_dir = Path("../models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = models_dir / "chem_similarity_nn_baseline_metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump({
+            "acc": float(acc),
+            "auroc": float(auroc) if not (isinstance(auroc, float) and (auroc != auroc)) else None,
+            "auprc": float(auprc) if not (isinstance(auprc, float) and (auprc != auprc)) else None,
+            "n_test": int(len(y_test)),
+            "n_train": int(len(y_train)),
+        }, f, indent=2)
+    print(f"Saved summary metrics to {metrics_path}")
 
 
 if __name__ == "__main__":
