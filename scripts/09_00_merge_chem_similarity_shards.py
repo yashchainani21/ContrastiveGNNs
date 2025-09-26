@@ -1,14 +1,23 @@
 from pathlib import Path
+import argparse
 import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score, roc_auc_score, average_precision_score
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Merge per-rank similarity shards and compute metrics.")
+    parser.add_argument(
+        "--glob",
+        default="chem_similarity_nn_baseline_mpi.rank*.parquet",
+        help="Glob pattern of shard files to merge (e.g., 'chem_similarity_nn_baseline_mpi.rank*.parquet' or 'mcs_similarity_nn_baseline_mpi.rank*.parquet')",
+    )
+    args = parser.parse_args()
+
     out_dir = Path("../data/processed")
-    shards = sorted(out_dir.glob("chem_similarity_nn_baseline_mpi.rank*.parquet"))
+    shards = sorted(out_dir.glob(args.glob))
     if not shards:
-        raise SystemExit("No shard files found. Expected chem_similarity_nn_baseline_mpi.rank*.parquet")
+        raise SystemExit(f"No shard files found for glob: {args.glob}")
 
     parts = []
     for p in shards:
@@ -38,11 +47,14 @@ def main():
         auprc = float("nan")
     print(f"Merged shards — ACC={acc:.4f} | AUROC={auroc:.4f} | AUPRC={auprc:.4f}")
 
-    final_path = out_dir / "chem_similarity_nn_baseline_mpi.parquet"
+    # Derive final path based on shard prefix
+    final_name = "chem_similarity_nn_baseline_mpi.parquet"
+    if "mcs_" in args.glob:
+        final_name = "mcs_similarity_nn_baseline_mpi.parquet"
+    final_path = out_dir / final_name
     merged.to_parquet(final_path, index=False)
     print(f"Saved merged results to {final_path}")
 
 
 if __name__ == "__main__":
     main()
-
