@@ -289,6 +289,17 @@ def train(args):
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
 
+            # Log per-batch label distribution (rank 0 only to avoid spam)
+            if getattr(args, 'log_batch_labels', False):
+                with torch.no_grad():
+                    bsz = int(yb.numel())
+                    pos = int((yb == 1).sum().item())
+                    neg = bsz - pos
+                if (not is_ddp) or (rank == 0):
+                    # Always log if batch is degenerate, else at interval
+                    if pos == 0 or neg == 0 or (steps % int(getattr(args, 'log_batch_every', 100)) == 0):
+                        print(f"  batch {steps:05d}: size={bsz}, pos={pos}, neg={neg}")
+
             with torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda')):
                 # no augmentations
                 _, z = encoder(xb) 
@@ -373,6 +384,8 @@ if __name__ == "__main__":
         balance=True,
         batch_size=1024,
         num_workers=2,
+        log_batch_labels=True,
+        log_batch_every=100,
         # Model
         fp_dim=2048,
         c1=64,
