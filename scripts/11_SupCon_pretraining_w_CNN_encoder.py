@@ -195,9 +195,23 @@ def train(args):
         device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else "cpu")
 
     base_train_ds = NPZFingerprints(args.train_npz, dtype=torch.float32, normalize=False)
-    # Use full training set
-    train_ds = base_train_ds
-    train_indices = None
+    # Build a subset: keep ALL positives and up to neg_limit negatives (random sample)
+    labels_all = base_train_ds.labels.astype(np.int64)
+    pos_idx = np.where(labels_all == 1)[0]
+    neg_idx = np.where(labels_all == 0)[0]
+    neg_limit = int(getattr(args, 'neg_limit', 0) or 0)
+    rng = np.random.RandomState(args.seed)
+    if neg_limit > 0 and len(neg_idx) > neg_limit:
+        neg_sample = rng.choice(neg_idx, size=neg_limit, replace=False)
+    else:
+        neg_sample = neg_idx
+    train_indices = np.concatenate([pos_idx, neg_sample])
+    rng.shuffle(train_indices)
+    train_ds = Subset(base_train_ds, train_indices)
+    if (not is_ddp) or (rank == 0):
+        pos_kept = int((labels_all[train_indices] == 1).sum())
+        neg_kept = int((labels_all[train_indices] == 0).sum())
+        print(f"Train subset: pos={pos_kept} (all), neg={neg_kept} (limit={neg_limit if neg_limit>0 else 'all'}) total={len(train_indices)}")
     val_loader = None
     if args.val_npz and os.path.exists(args.val_npz):
         # Use train statistics for normalization to avoid leakage
@@ -374,8 +388,9 @@ if __name__ == "__main__":
         val_npz="../data/val/baseline_val_ecfp4.npz",
         normalize=False,
         train_limit=0,
+        neg_limit=20000,
         balance=True,
-        batch_size=256,
+        batch_size=8192,
         num_workers=2,
         log_batch_labels=True,
         log_batch_every=100,
