@@ -195,16 +195,9 @@ def train(args):
         device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else "cpu")
 
     base_train_ds = NPZFingerprints(args.train_npz, dtype=torch.float32, normalize=False)
-    # Optionally cap training set for quick runs
+    # Use full training set
     train_ds = base_train_ds
     train_indices = None
-    if getattr(args, 'train_limit', None):
-        limit = int(args.train_limit)
-        if limit > 0 and len(base_train_ds) > limit:
-            train_indices = np.arange(limit)
-            train_ds = Subset(base_train_ds, train_indices)
-            if (not is_ddp) or (rank == 0):
-                print(f"Capped training set to first {limit} samples (was {len(base_train_ds)})")
     val_loader = None
     if args.val_npz and os.path.exists(args.val_npz):
         # Use train statistics for normalization to avoid leakage
@@ -380,9 +373,9 @@ if __name__ == "__main__":
         train_npz="../data/train/baseline_train_ecfp4.npz",
         val_npz="../data/val/baseline_val_ecfp4.npz",
         normalize=False,
-        train_limit=15000,
+        train_limit=0,
         balance=True,
-        batch_size=1024,
+        batch_size=256,
         num_workers=2,
         log_batch_labels=True,
         log_batch_every=100,
