@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler, Subset
 from types import SimpleNamespace
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -188,13 +188,33 @@ def train(args):
     else:
         device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else "cpu")
 
-    train_ds = NPZFingerprints(args.train_npz, dtype=torch.float32, normalize=args.normalize)
+    base_train_ds = NPZFingerprints(args.train_npz, dtype=torch.float32, normalize=False)
+    # Optionally cap training set for quick runs
+    train_ds = base_train_ds
+    train_indices = None
+    if getattr(args, 'train_limit', None):
+        limit = int(args.train_limit)
+        if limit > 0 and len(base_train_ds) > limit:
+            train_indices = np.arange(limit)
+            train_ds = Subset(base_train_ds, train_indices)
+            if (not is_ddp) or (rank == 0):
+                print(f"Capped training set to first {limit} samples (was {len(base_train_ds)})")
     val_loader = None
     if args.val_npz and os.path.exists(args.val_npz):
         # Use train statistics for normalization to avoid leakage
         if args.normalize:
-            mean, std = train_ds.mean, train_ds.std
-            val_ds = NPZFingerprints(args.val_npz, dtype=torch.float32, normalize=True, mean=mean, std=std)
+            # Compute mean/std from the (possibly capped) training set
+            if isinstance(train_ds, Subset):
+                idx = np.array(train_ds.indices)
+                arr = np.asarray(base_train_ds.fps[idx], dtype=np.float32)
+                train_mean = arr.mean(axis=0)
+                train_std = arr.std(axis=0) + 1e-8
+            else:
+                # train_ds is NPZFingerprints with normalize=False; compute here
+                arr = np.asarray(train_ds.fps, dtype=np.float32)
+                train_mean = arr.mean(axis=0)
+                train_std = arr.std(axis=0) + 1e-8
+            val_ds = NPZFingerprints(args.val_npz, dtype=torch.float32, normalize=True, mean=train_mean, std=train_std)
         else:
             val_ds = NPZFingerprints(args.val_npz, dtype=torch.float32, normalize=False)
         if is_ddp:
@@ -206,7 +226,11 @@ def train(args):
                                     num_workers=args.num_workers, pin_memory=(device.type=='cuda'))
 
     # weighted sample to ensure PKSs appear regularly in batches
-    labels_np = train_ds.labels.astype(np.int64)
+    # Labels for balancing (pull from base dataset, respecting any cap)
+    if isinstance(train_ds, Subset):
+        labels_np = base_train_ds.labels[np.array(train_ds.indices)].astype(np.int64)
+    else:
+        labels_np = train_ds.labels.astype(np.int64)
     if is_ddp:
         # Use DistributedSampler; disable custom balancing in this simple setup
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_ds, shuffle=True)
@@ -229,18 +253,18 @@ def train(args):
 
     # model & loss
     base_encoder = fp_CNN_Encoder(fp_dim = args.fp_dim,
-                             hidden_channels = (args.c1, args.c2),
-                             embed_dim = args.embed_dim,
-                             proj_dim = args.proj_dim,
-                             use_projection = args.use_projection,
-                             batchnorm_safe = args.batchnorm_safe).to(device)
+                              hidden_channels = (args.c1, args.c2),
+                              embed_dim = args.embed_dim,
+                              proj_dim = args.proj_dim,
+                              use_projection = args.use_projection,
+                              batchnorm_safe = args.batchnorm_safe).to(device)
     encoder = base_encoder
     if is_ddp:
         encoder = DDP(base_encoder, device_ids=[local_rank], output_device=local_rank)
 
     criterion = SupConLoss(temperature=args.temperature).to(device)
     optimizer = torch.optim.AdamW(encoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
+    scaler = torch.amp.GradScaler(enabled=(device.type == 'cuda'))
 
     os.makedirs(args.out_dir, exist_ok=True)
     best_monitor = -1.0
@@ -339,6 +363,7 @@ if __name__ == "__main__":
         train_npz="../data/train/baseline_train_ecfp4.npz",
         val_npz="../data/val/baseline_val_ecfp4.npz",
         normalize=False,
+        train_limit=15000,
         balance=True,
         batch_size=1024,
         num_workers=2,
