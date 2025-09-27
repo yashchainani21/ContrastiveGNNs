@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from types import SimpleNamespace
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from typing import Tuple
 
 class fp_CNN_Encoder(nn.Module):
@@ -172,7 +174,19 @@ def evaluate_val(val_loader, encoder, device):
 
 def train(args):
     seed_all(args.seed)
-    device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else "cpu")
+    # Distributed setup (torchrun-friendly)
+    is_ddp = False
+    local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+
+    if world_size > 1 and not args.cpu:
+        is_ddp = True
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else "cpu")
 
     train_ds = NPZFingerprints(args.train_npz, dtype=torch.float32, normalize=args.normalize)
     val_loader = None
@@ -183,26 +197,46 @@ def train(args):
             val_ds = NPZFingerprints(args.val_npz, dtype=torch.float32, normalize=True, mean=mean, std=std)
         else:
             val_ds = NPZFingerprints(args.val_npz, dtype=torch.float32, normalize=False)
-        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=(device.type=='cuda'))
+        if is_ddp:
+            val_sampler = torch.utils.data.distributed.DistributedSampler(val_ds, shuffle=False)
+            val_loader = DataLoader(val_ds, batch_size=args.batch_size, sampler=val_sampler,
+                                    num_workers=args.num_workers, pin_memory=(device.type=='cuda'))
+        else:
+            val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                                    num_workers=args.num_workers, pin_memory=(device.type=='cuda'))
 
     # weighted sample to ensure PKSs appear regularly in batches
     labels_np = train_ds.labels.astype(np.int64)
-    sampler = make_weighted_sampler(labels_np) if args.balance else None
-    train_loader = DataLoader(train_ds,
-                              batch_size=args.batch_size,
-                              sampler=sampler,
-                              shuffle=(sampler is None),
-                              num_workers=args.num_workers,
-                              pin_memory=(device.type=='cuda'),
-                              drop_last=True)
+    if is_ddp:
+        # Use DistributedSampler; disable custom balancing in this simple setup
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_ds, shuffle=True)
+        train_loader = DataLoader(train_ds,
+                                  batch_size=args.batch_size,
+                                  sampler=train_sampler,
+                                  shuffle=False,
+                                  num_workers=args.num_workers,
+                                  pin_memory=(device.type=='cuda'),
+                                  drop_last=True)
+    else:
+        sampler = make_weighted_sampler(labels_np) if args.balance else None
+        train_loader = DataLoader(train_ds,
+                                  batch_size=args.batch_size,
+                                  sampler=sampler,
+                                  shuffle=(sampler is None),
+                                  num_workers=args.num_workers,
+                                  pin_memory=(device.type=='cuda'),
+                                  drop_last=True)
 
     # model & loss
-    encoder = fp_CNN_Encoder(fp_dim = args.fp_dim,
+    base_encoder = fp_CNN_Encoder(fp_dim = args.fp_dim,
                              hidden_channels = (args.c1, args.c2),
                              embed_dim = args.embed_dim,
                              proj_dim = args.proj_dim,
                              use_projection = args.use_projection,
                              batchnorm_safe = args.batchnorm_safe).to(device)
+    encoder = base_encoder
+    if is_ddp:
+        encoder = DDP(base_encoder, device_ids=[local_rank], output_device=local_rank)
 
     criterion = SupConLoss(temperature=args.temperature).to(device)
     optimizer = torch.optim.AdamW(encoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -218,6 +252,9 @@ def train(args):
         epoch_loss, steps = 0.0, 0
         t0 = time.time()
 
+        if is_ddp:
+            # Ensure different shuffling per epoch
+            train_loader.sampler.set_epoch(epoch)
         for xb, yb in train_loader:
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
@@ -241,13 +278,56 @@ def train(args):
         msg = f"[Epoch {epoch:03d}] train_supcon={epoch_loss:.4f} time={time.time()-t0:.1f}s"
 
         if val_loader is not None:
-            auprc = evaluate_val(val_loader, encoder, device)
-            msg += f" val_AUPRC={auprc:.4f}"
-        print(msg)
+            # Distributed-safe evaluation: gather embeddings across ranks
+            encoder.eval()
+            all_g_local, all_y_local = [], []
+            with torch.no_grad():
+                for xb, yb in val_loader:
+                    xb = xb.to(device, non_blocking=True)
+                    out = encoder(xb)
+                    g = out[0] if base_encoder.use_projection else out
+                    all_g_local.append(g.cpu())
+                    all_y_local.append(yb)
+            X_local = torch.cat(all_g_local, dim=0).numpy() if all_g_local else np.zeros((0, args.embed_dim), dtype=np.float32)
+            y_local = torch.cat(all_y_local, dim=0).numpy() if all_y_local else np.zeros((0,), dtype=np.int64)
 
-    torch.save({"encoder": encoder.state_dict(), "args": vars(args)},
-               os.path.join(args.out_dir, "last_encoder.pt"))
-    print(f"Saved to {args.out_dir}")
+            if is_ddp:
+                # gather objects across ranks
+                obj = (X_local, y_local)
+                gathered = [None for _ in range(world_size)]
+                dist.all_gather_object(gathered, obj)
+                if rank == 0:
+                    X = np.concatenate([g[0] for g in gathered if g is not None and len(g[0])>0], axis=0)
+                    y = np.concatenate([g[1] for g in gathered if g is not None and len(g[1])>0], axis=0)
+                else:
+                    X = None; y = None
+                # Broadcast a small flag to synchronize
+                flag = torch.tensor(1, device=device)
+                dist.all_reduce(flag)
+            else:
+                X, y = X_local, y_local
+
+            if (not is_ddp) or (is_ddp and rank == 0):
+                from sklearn.linear_model import LogisticRegression
+                from sklearn.metrics import average_precision_score
+                if X is not None and len(X) > 1 and len(np.unique(y)) > 1:
+                    clf = LogisticRegression(max_iter=1000, class_weight="balanced")
+                    clf.fit(X, y)
+                    y_pred = clf.predict_proba(X)[:,1]
+                    auprc = average_precision_score(y, y_pred)
+                    msg += f" val_AUPRC={auprc:.4f}"
+                else:
+                    msg += " val_AUPRC=NA"
+        if (not is_ddp) or (rank == 0):
+            print(msg)
+
+    if (not is_ddp) or (rank == 0):
+        state = encoder.module.state_dict() if is_ddp else encoder.state_dict()
+        torch.save({"encoder": state, "args": vars(args)},
+                   os.path.join(args.out_dir, "last_encoder.pt"))
+        print(f"Saved to {args.out_dir}")
+    if is_ddp:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
