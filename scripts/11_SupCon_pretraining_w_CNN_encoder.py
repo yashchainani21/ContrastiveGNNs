@@ -54,10 +54,10 @@ class fp_CNN_Encoder(nn.Module):
             x = x.unsqueeze(1) # add channel dim, [B, 1, fp_dim]
 
         h = self.conv(x).squeeze(-1) # [B, c2, 1] -> [B, c2]
-        g = F.normalize(self.fc(h), dim = -1) # [B, embed_dim], normalized embedding
+        g = F.normalize(self.fc(h), dim = -1, eps=1e-6) # [B, embed_dim], normalized embedding
 
         if self.use_projection:
-            z = F.normalize(self.proj(g), dim = -1)
+            z = F.normalize(self.proj(g), dim = -1, eps=1e-6)
             return g, z
         else:
             return g
@@ -201,10 +201,14 @@ def train(args):
     if getattr(args, 'train_limit', None):
         limit = int(args.train_limit)
         if limit > 0 and len(base_train_ds) > limit:
-            train_indices = np.arange(limit)
+            rng = np.random.RandomState(args.seed)
+            train_indices = rng.choice(len(base_train_ds), size=limit, replace=False)
             train_ds = Subset(base_train_ds, train_indices)
             if (not is_ddp) or (rank == 0):
-                print(f"Capped training set to first {limit} samples (was {len(base_train_ds)})")
+                capped_labels = base_train_ds.labels[train_indices]
+                pos = int((capped_labels == 1).sum())
+                neg = int((capped_labels == 0).sum())
+                print(f"Capped training set to {limit} random samples (was {len(base_train_ds)}); pos={pos}, neg={neg}")
     val_loader = None
     if args.val_npz and os.path.exists(args.val_npz):
         # Use train statistics for normalization to avoid leakage
@@ -302,8 +306,15 @@ def train(args):
 
             with torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda')):
                 # no augmentations
-                _, z = encoder(xb) 
+                out = encoder(xb)
+                z = out[1] if base_encoder.use_projection else out
                 loss = criterion(z, yb)
+
+            if not torch.isfinite(loss):
+                if (not is_ddp) or (rank == 0):
+                    print(f"  Warning: non-finite loss encountered (loss={loss.item():.4f}); skipping step")
+                optimizer.zero_grad(set_to_none=True)
+                continue
 
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
