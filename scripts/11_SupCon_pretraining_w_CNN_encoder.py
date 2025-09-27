@@ -110,24 +110,30 @@ class SupConLoss(nn.Module):
         """
         z: [B, d] normalized projections
         labels: [B] int labels
+        Autocast-safe: compute similarity in float32 to avoid -1e9 overflows in fp16.
         """
         B = z.size(0)
-        sim = z @ z.t() / self.tau  # cosine sims since z normalized
+        # Ensure stable dtype for logits
+        z = z.float()
+        sim = (z @ z.t()) / float(self.tau)  # [B,B]
 
         # masks
         eye = torch.eye(B, dtype=torch.bool, device=z.device)
         labels = labels.view(-1, 1)
-        pos_mask = (labels == labels.t()) & (~eye)   # same-class pairs
-        all_mask = ~eye                              # all except self
+        pos_mask = (labels == labels.t()) & (~eye)   # same-class pairs (exclude self)
 
-        # log prob over all others
-        logits = sim
-        denom = torch.logsumexp(logits.masked_fill(~all_mask, -1e9), dim=1, keepdim=True)
-        log_prob = logits - denom
+        # Stabilize logits: subtract per-row max before logsumexp
+        sim = sim - sim.max(dim=1, keepdim=True).values
+        # Mask self-terms with -inf (float32)
+        logits = sim.masked_fill(eye, float('-inf'))
+        denom = torch.logsumexp(logits, dim=1, keepdim=True)
+        log_prob = logits - denom  # [B,B]
 
-        # average over positives per anchor
-        pos_log_prob = (pos_mask * log_prob).sum(1) / (pos_mask.sum(1) + 1e-9)
-        loss = -pos_log_prob.mean()
+        # Average over positives per anchor; ignore anchors with zero positives
+        pos_counts = pos_mask.sum(1).clamp_min(1)
+        pos_log_prob = (pos_mask * log_prob).sum(1) / pos_counts
+        valid = (pos_mask.sum(1) > 0).float()
+        loss = -(pos_log_prob * valid).sum() / valid.sum().clamp_min(1)
         return loss
 
 
