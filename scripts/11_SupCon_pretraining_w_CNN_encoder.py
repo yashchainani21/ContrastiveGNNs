@@ -281,11 +281,12 @@ def train(args):
                                   pin_memory=(device.type=='cuda'),
                                   drop_last=True)
 
-    # model & loss
+    # Model init: pick fp_dim from training data shape
+    fp_dim = base_train_ds.D
     if getattr(args, 'model_type', 'cnn') == 'mlp':
-        base_encoder = TinyMLP(fp_dim=args.fp_dim, embed_dim=args.embed_dim, proj_dim=args.proj_dim).to(device)
+        base_encoder = TinyMLP(fp_dim=fp_dim, embed_dim=args.embed_dim, proj_dim=args.proj_dim).to(device)
     else:
-        base_encoder = fp_CNN_Encoder(fp_dim = args.fp_dim,
+        base_encoder = fp_CNN_Encoder(fp_dim = fp_dim,
                                   hidden_channels = (args.c1, args.c2),
                                   embed_dim = args.embed_dim,
                                   proj_dim = args.proj_dim,
@@ -294,6 +295,10 @@ def train(args):
     encoder = base_encoder
     if is_ddp:
         encoder = DDP(base_encoder, device_ids=[local_rank], output_device=local_rank)
+
+    # Print summary line similar to requested snippet
+    if (not is_ddp) or (rank == 0):
+        print("Train size:", len(train_ds), "| fp_dim:", fp_dim)
 
     criterion = SupConLoss(temperature=args.temperature).to(device)
     optimizer = torch.optim.AdamW(encoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
