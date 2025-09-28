@@ -54,10 +54,10 @@ class fp_CNN_Encoder(nn.Module):
             x = x.unsqueeze(1) # add channel dim, [B, 1, fp_dim]
 
         h = self.conv(x).squeeze(-1) # [B, c2, 1] -> [B, c2]
-        g = F.normalize(self.fc(h), dim = -1) # [B, embed_dim], normalized embedding
+        g = F.normalize(self.fc(h), dim = -1, eps=1e-8) # [B, embed_dim], normalized embedding
 
         if self.use_projection:
-            z = F.normalize(self.proj(g), dim = -1)
+            z = F.normalize(self.proj(g), dim = -1, eps=1e-8) # [B, proj_dim], normalized projection
             return g, z
         else:
             return g
@@ -227,7 +227,7 @@ def train(args):
                 arr = np.asarray(train_ds.fps, dtype=np.float32)
                 train_mean = arr.mean(axis=0)
                 train_std = arr.std(axis=0) + 1e-8
-            val_ds = NPZFingerprints(args.val_npz, dtype=torch.float32, normalize=True, mean=train_mean, std=train_std)
+            val_ds = NPZFingerprints(args.val_npz, dtype=torch.float32, normalize=False, mean=train_mean, std=train_std)
         else:
             val_ds = NPZFingerprints(args.val_npz, dtype=torch.float32, normalize=False)
         if is_ddp:
@@ -309,8 +309,15 @@ def train(args):
 
             with torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda')):
                 # no augmentations
-                _, z = encoder(xb) 
+                out = encoder(xb)
+                z = out[1] if base_encoder.use_projection else out
                 loss = criterion(z, yb)
+            # Skip non-finite loss to avoid contaminating the average
+            if not torch.isfinite(loss):
+                if (not is_ddp) or (rank == 0):
+                    print(f"  Warning: non-finite loss encountered (loss={loss.item():.4f}); skipping step")
+                optimizer.zero_grad(set_to_none=True)
+                continue
 
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -390,7 +397,7 @@ if __name__ == "__main__":
         train_limit=0,
         neg_limit=20000,
         balance=True,
-        batch_size=8192,
+        batch_size=256,
         num_workers=2,
         log_batch_labels=True,
         log_batch_every=100,
@@ -408,7 +415,7 @@ if __name__ == "__main__":
         weight_decay=1e-4,
         grad_clip=0.0,
         # Train loop
-        epochs=10,
+        epochs=100,
         out_dir="../models/supcon_cnn",
     )
 
