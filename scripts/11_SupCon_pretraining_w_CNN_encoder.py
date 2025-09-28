@@ -332,6 +332,13 @@ def train(args):
                     if pos == 0 or neg == 0 or (steps % int(getattr(args, 'log_batch_every', 100)) == 0):
                         print(f"  batch {steps:05d}: size={bsz}, pos={pos}, neg={neg}")
 
+            # Check for degenerate batch: needs at least two classes
+            if yb.unique().numel() < 2:
+                if (not is_ddp) or (rank == 0):
+                    print("Batch has only one class → skipping")
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
             with torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda')):
                 # no augmentations
                 out = encoder(xb)
@@ -354,8 +361,11 @@ def train(args):
 
             epoch_loss += loss.item(); steps += 1
 
-        epoch_loss /= max(1, steps)
-        msg = f"[Epoch {epoch:03d}] train_supcon={epoch_loss:.4f} time={time.time()-t0:.1f}s"
+        if steps == 0:
+            msg = f"[Epoch {epoch:03d}] all batches skipped time={time.time()-t0:.1f}s"
+        else:
+            train_loss = epoch_loss / steps
+            msg = f"[Epoch {epoch:03d}] train_supcon={train_loss:.4f} time={time.time()-t0:.1f}s"
 
         if val_loader is not None:
             # Distributed-safe evaluation: gather embeddings across ranks
