@@ -321,16 +321,14 @@ def train(args):
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
 
-            # Log per-batch label distribution (rank 0 only to avoid spam)
+            # Log per-batch label distribution (rank 0 only)
             if getattr(args, 'log_batch_labels', False):
                 with torch.no_grad():
                     bsz = int(yb.numel())
                     pos = int((yb == 1).sum().item())
                     neg = bsz - pos
                 if (not is_ddp) or (rank == 0):
-                    # Always log if batch is degenerate, else at interval
-                    if pos == 0 or neg == 0 or (steps % int(getattr(args, 'log_batch_every', 100)) == 0):
-                        print(f"  batch {steps:05d}: size={bsz}, pos={pos}, neg={neg}")
+                    print(f"  batch {steps:05d}: size={bsz}, pos={pos}, neg={neg}")
 
             # Check for degenerate batch: needs at least two classes
             if yb.unique().numel() < 2:
