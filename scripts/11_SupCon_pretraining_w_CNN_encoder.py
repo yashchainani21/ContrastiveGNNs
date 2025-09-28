@@ -63,6 +63,23 @@ class fp_CNN_Encoder(nn.Module):
             return g
 
 
+class TinyMLP(nn.Module):
+    def __init__(self, fp_dim: int, embed_dim: int = 256, proj_dim: int = 120):
+        super().__init__()
+        self.fc1 = nn.Linear(fp_dim, 256)
+        self.fc2 = nn.Linear(256, embed_dim)
+        self.proj = nn.Linear(embed_dim, proj_dim)
+        # for compatibility with downstream code expecting this attribute
+        self.use_projection = True
+
+    def forward(self, x: torch.Tensor):
+        # x: [B, fp_dim]
+        h = F.relu(self.fc1(x))
+        g = F.normalize(self.fc2(h), dim=-1, eps=1e-6)
+        z = F.normalize(self.proj(g), dim=-1, eps=1e-6)
+        return g, z
+
+
 class NPZFingerprints(Dataset):
     """
     Dataset for loading precomputed fingerprints from a .npz file.
@@ -97,43 +114,43 @@ class NPZFingerprints(Dataset):
         return torch.as_tensor(x, dtype=self.dtype), torch.as_tensor(y, dtype=torch.long)
     
 class SupConLoss(nn.Module):
-    """
-    Supervised Contrastive Learning Loss (Khosla et al., 2020)
-    Operates on normalized embeddings; no augmentations needed.
-    All samples sharing the same label in a batch are considered positives.
-    """
-    def __init__(self, temperature: float = 0.1):
+    def __init__(self, temperature: float = 0.1, eps: float = 1e-8):
         super().__init__()
         self.tau = temperature
+        self.eps = eps
 
     def forward(self, z: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """
-        z: [B, d] normalized projections
-        labels: [B] int labels
-        Autocast-safe: compute similarity in float32 to avoid -1e9 overflows in fp16.
-        """
         B = z.size(0)
-        # Ensure stable dtype for logits
-        z = z.float()
-        sim = (z @ z.t()) / float(self.tau)  # [B,B]
+        # safety normalize in float32
+        z = F.normalize(z.float(), dim=-1, eps=self.eps)
 
-        # masks
+        sim = (z @ z.t()) / self.tau  # [B,B]
         eye = torch.eye(B, dtype=torch.bool, device=z.device)
         labels = labels.view(-1, 1)
-        pos_mask = (labels == labels.t()) & (~eye)   # same-class pairs (exclude self)
+        pos_mask = (labels == labels.t()) & (~eye)
 
-        # Stabilize logits: subtract per-row max before logsumexp
+        # remove anchors with no positives
+        valid_mask = pos_mask.sum(1) > 0
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=z.device, requires_grad=True)
+
+        # restrict to valid anchors only
+        sim = sim[valid_mask]
+        pos_mask = pos_mask[valid_mask]
+
+        # stable log-softmax per row
         sim = sim - sim.max(dim=1, keepdim=True).values
-        # Mask self-terms with -inf (float32)
-        logits = sim.masked_fill(eye, float('-inf'))
+        logits = sim.masked_fill(~torch.isfinite(sim), float('-inf'))
         denom = torch.logsumexp(logits, dim=1, keepdim=True)
-        log_prob = logits - denom  # [B,B]
+        log_prob = logits - denom
 
-        # Average over positives per anchor; ignore anchors with zero positives
         pos_counts = pos_mask.sum(1).clamp_min(1)
         pos_log_prob = (pos_mask * log_prob).sum(1) / pos_counts
-        valid = (pos_mask.sum(1) > 0).float()
-        loss = -(pos_log_prob * valid).sum() / valid.sum().clamp_min(1)
+
+        loss = -pos_log_prob.mean()
+        if not torch.isfinite(loss):
+            print("SupConLoss still produced NaN; returning 0.0")
+            return torch.tensor(0.0, device=z.device, requires_grad=True)
         return loss
 
 
@@ -265,12 +282,15 @@ def train(args):
                                   drop_last=True)
 
     # model & loss
-    base_encoder = fp_CNN_Encoder(fp_dim = args.fp_dim,
-                              hidden_channels = (args.c1, args.c2),
-                              embed_dim = args.embed_dim,
-                              proj_dim = args.proj_dim,
-                              use_projection = args.use_projection,
-                              batchnorm_safe = args.batchnorm_safe).to(device)
+    if getattr(args, 'model_type', 'cnn') == 'mlp':
+        base_encoder = TinyMLP(fp_dim=args.fp_dim, embed_dim=args.embed_dim, proj_dim=args.proj_dim).to(device)
+    else:
+        base_encoder = fp_CNN_Encoder(fp_dim = args.fp_dim,
+                                  hidden_channels = (args.c1, args.c2),
+                                  embed_dim = args.embed_dim,
+                                  proj_dim = args.proj_dim,
+                                  use_projection = args.use_projection,
+                                  batchnorm_safe = args.batchnorm_safe).to(device)
     encoder = base_encoder
     if is_ddp:
         encoder = DDP(base_encoder, device_ids=[local_rank], output_device=local_rank)
@@ -402,6 +422,7 @@ if __name__ == "__main__":
         log_batch_labels=True,
         log_batch_every=100,
         # Model
+        model_type='cnn',  # or 'mlp'
         fp_dim=2048,
         c1=64,
         c2=128,
