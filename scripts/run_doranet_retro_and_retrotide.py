@@ -56,7 +56,7 @@ def run_doranet_retro(start_smiles: str, gens: int = 1) -> Set[str]:
     return smiles_set
 
 
-def try_retrotide_design(target_smiles: str, max_designs: int = 25, similarity: str = "mcs_without_stereo"):
+def try_retrotide_design(target_smiles: str, max_designs: int = 15, similarity: str = "mcs_without_stereo"):
     """Attempt to design a PKS for the target using RetroTide.
 
     Returns a tuple: (best_score: float, total_rounds: int, top_smiles: str)
@@ -128,8 +128,9 @@ def main():
     # Try RetroTide for each product (in series) and time the total duration
     results = []
     rt_start = time.time()
-    for smi in sorted(products):
-        print(f"\n=== RetroTide on: {smi} ===")
+    total_targets = len(products)
+    for idx, smi in enumerate(sorted(products), start=1):
+        print(f"\n[{idx}/{total_targets}] RetroTide on: {smi}")
         res = try_retrotide_design(smi)
         if res is None:
             results.append({
