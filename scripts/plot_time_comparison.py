@@ -83,14 +83,17 @@ def main():
 
     labels, values = zip(*bars)
 
-    plt.figure(figsize=(8, 4))
+    plt.figure(figsize=(9, 5))
     colors = ["#4C78A8", "#F58518", "#54A24B", "#E45756"]
     plt.bar(range(len(values)), values, color=colors[: len(values)])
     plt.xticks(range(len(values)), labels, rotation=15, ha="right")
     plt.ylabel("Seconds (total)")
     plt.title(args.title)
+    # Add some headroom on y-axis so labels fit comfortably
+    y_max = max(values) if len(values) > 0 else 1.0
+    plt.ylim(0, y_max * 1.25)
     for i, v in enumerate(values):
-        plt.text(i, v, f"{v:.2f}s", ha="center", va="bottom")
+        plt.text(i, v, f"{v:.5f}s", ha="center", va="bottom")
     plt.tight_layout()
     out_path = os.path.abspath(args.out)
     plt.savefig(out_path, dpi=200)
@@ -99,4 +102,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
