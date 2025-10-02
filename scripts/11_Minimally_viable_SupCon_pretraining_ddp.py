@@ -359,13 +359,17 @@ def main():
         sel_len = np.zeros((1,), dtype=np.int64)
 
     if is_dist():
-        # Broadcast length then indices
+        # Broadcast length then indices; NCCL requires tensors to live on CUDA devices
         sel_len_t = torch.from_numpy(sel_len)
+        if device.type == "cuda":
+            sel_len_t = sel_len_t.to(device)
         dist.broadcast(sel_len_t, src=0)
         sel_len = sel_len_t.cpu().numpy()
         if rank != 0:
             sel_idx_np = np.empty((sel_len[0],), dtype=np.int64)
         sel_idx_t = torch.from_numpy(sel_idx_np)
+        if device.type == "cuda":
+            sel_idx_t = sel_idx_t.to(device)
         dist.broadcast(sel_idx_t, src=0)
         sel_idx_np = sel_idx_t.cpu().numpy()
 
@@ -446,4 +450,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
