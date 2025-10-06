@@ -148,7 +148,11 @@ embed_dim = EMBED_DIM or config.get('embed_dim', 512)
 proj_dim = PROJ_DIM or config.get('proj_dim', 256)
 model = build_model(model_type=model_type, fp_dim=2048,
                     embed_dim=embed_dim, proj_dim=proj_dim)
-model.load_state_dict(checkpoint['model_state_dict'])
+missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+if missing:
+    print("[Warning] Missing keys when loading checkpoint:", missing)
+if unexpected:
+    print("[Warning] Unexpected keys when loading checkpoint:", unexpected)
 model.eval()
 
 clf = load(DOWNSTREAM_CLF)
