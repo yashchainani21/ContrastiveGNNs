@@ -15,7 +15,7 @@ MODEL_TYPE = None        # 'resnet' | 'cnn' | 'mlp'; None = load from checkpoint
 EMBED_DIM = None         # override encoder embed dim; None = load from checkpoint metadata
 PROJ_DIM = None          # override projection dim; None = load from checkpoint metadata
 EMBED_SOURCE = 'preproj'  # 'preproj' (g) or 'proj' (z) for downstream features
-BATCH_SIZE = 8192
+BATCH_SIZE = 2048
 NUM_WORKERS = 4
 
 # ---- Paths ----
