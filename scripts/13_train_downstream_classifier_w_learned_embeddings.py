@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score
@@ -15,9 +16,10 @@ EMBED_DIM = None         # override encoder embed dim; None = load from checkpoi
 PROJ_DIM = None          # override projection dim; None = load from checkpoint metadata
 EMBED_SOURCE = 'preproj'  # 'preproj' (g) or 'proj' (z) for downstream features
 BATCH_SIZE = 8192
+NUM_WORKERS = 4
 
 # ---- Paths ----
-MODEL_CHECKPOINT = '../models/supcon_ddp_resnet_latest.pt'  # update to actual filename
+MODEL_CHECKPOINT = '../models/supcon_ddp_resnet_20251006_100411.pt'  # update to actual filename
 TRAIN_NPZ = '../data/train/baseline_train_ecfp4.npz'
 OUTPUT_EMBEDS = '../models/train_embeddings.npy'
 OUTPUT_LABELS = '../models/train_labels.npy'
@@ -142,7 +144,13 @@ embed_dim = EMBED_DIM or config.get('embed_dim', 512)
 proj_dim = PROJ_DIM or config.get('proj_dim', 256)
 model = build_model(model_type=model_type, fp_dim=2048,
                     embed_dim=embed_dim, proj_dim=proj_dim)
-model.load_state_dict(checkpoint['model_state_dict'])
+missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+if missing:
+    print("[Warning] Missing keys when loading checkpoint:", missing)
+if unexpected:
+    print("[Warning] Unexpected keys when loading checkpoint:", unexpected)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
 model.eval()
 
 
@@ -158,18 +166,26 @@ print(f"Using {'pre-projection' if use_preproj else 'projection'} embeddings for
 
 
 # ---- Compute embeddings ----
+tensor_dataset = TensorDataset(torch.from_numpy(fps))
+loader = DataLoader(
+    tensor_dataset,
+    batch_size=BATCH_SIZE,
+    num_workers=NUM_WORKERS,
+    pin_memory=torch.cuda.is_available(),
+    persistent_workers=NUM_WORKERS > 0,
+)
+
 embeddings = []
-for start in range(0, len(fps), BATCH_SIZE):
-    end = start + BATCH_SIZE
-    xb = torch.from_numpy(fps[start:end])
-    with torch.no_grad():
+with torch.no_grad():
+    for (xb,) in loader:
+        xb = xb.to(device, non_blocking=True)
         outputs = model(xb)
         if isinstance(outputs, tuple):
             g, z = outputs
         else:
             g, z = outputs, outputs
         features = g if use_preproj else z
-    embeddings.append(features.numpy())
+        embeddings.append(features.cpu().numpy())
 
 embeddings = np.vstack(embeddings)
 np.save(OUTPUT_EMBEDS, embeddings)
