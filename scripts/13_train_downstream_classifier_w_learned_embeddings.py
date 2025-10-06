@@ -1,4 +1,3 @@
-import json
 import os
 import numpy as np
 import torch
@@ -6,13 +5,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import average_precision_score
+from joblib import dump
 
 
 # ---- Hyperparameters ----
-MODEL_TYPE = 'resnet'        # 'resnet' | 'cnn' | 'mlp'; None = load from checkpoint
-EMBED_DIM = 512         # override encoder embed dim; None = load from checkpoint metadata
-PROJ_DIM = 256          # override projection dim; None = load from checkpoint metadata
+MODEL_TYPE = None        # 'resnet' | 'cnn' | 'mlp'; None = load from checkpoint
+EMBED_DIM = None         # override encoder embed dim; None = load from checkpoint metadata
+PROJ_DIM = None          # override projection dim; None = load from checkpoint metadata
 EMBED_SOURCE = 'preproj'  # 'preproj' (g) or 'proj' (z) for downstream features
 BATCH_SIZE = 8192
 
@@ -21,6 +21,7 @@ MODEL_CHECKPOINT = '../models/supcon_ddp_resnet_latest.pt'  # update to actual f
 TRAIN_NPZ = '../data/train/baseline_train_ecfp4.npz'
 OUTPUT_EMBEDS = '../models/train_embeddings.npy'
 OUTPUT_LABELS = '../models/train_labels.npy'
+OUTPUT_CLF = '../models/downstream_logreg.pkl'
 
 
 # ---- Model Definitions (must match training script) ----
@@ -182,22 +183,8 @@ clf = LogisticRegression(max_iter=10_000, class_weight='balanced')
 clf.fit(embeddings, labels)
 preds = clf.predict_proba(embeddings)[:, 1]
 auprc = average_precision_score(labels, preds)
-rocauc = roc_auc_score(labels, preds)
-print(f"LogReg (train) AUPRC={auprc:.4f}, ROC-AUC={rocauc:.4f}")
+print(f"LogReg (train) AUPRC={auprc:.4f}")
 
-
-model_info = {
-    "checkpoint": MODEL_CHECKPOINT,
-    "train_npz": TRAIN_NPZ,
-    "embedding_file": OUTPUT_EMBEDS,
-    "label_file": OUTPUT_LABELS,
-    "model_type": model_type,
-    "embed_dim": embed_dim,
-    "proj_dim": proj_dim,
-    "embed_source": EMBED_SOURCE,
-    "auprc": auprc,
-    "roc_auc": rocauc,
-}
-with open('../models/downstream_logreg_metrics.json', 'w') as f:
-    json.dump(model_info, f, indent=2)
-print("Metrics saved to ../models/downstream_logreg_metrics.json")
+os.makedirs(os.path.dirname(OUTPUT_CLF), exist_ok=True)
+dump(clf, OUTPUT_CLF)
+print(f"Downstream classifier saved to {OUTPUT_CLF}")
