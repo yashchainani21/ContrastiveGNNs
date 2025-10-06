@@ -18,9 +18,9 @@ BATCH_SIZE = 8192
 
 # ---- Paths ----
 MODEL_CHECKPOINT = '../models/supcon_ddp_resnet_latest.pt'  # update to actual filename
-TEST_NPZ = '../data/test/baseline_test_ecfp4.npz'
-OUTPUT_EMBEDS = '../models/test_embeddings.npy'
-OUTPUT_LABELS = '../models/test_labels.npy'
+TRAIN_NPZ = '../data/train/baseline_train_ecfp4.npz'
+OUTPUT_EMBEDS = '../models/train_embeddings.npy'
+OUTPUT_LABELS = '../models/train_labels.npy'
 
 
 # ---- Model Definitions (must match training script) ----
@@ -147,11 +147,11 @@ model.eval()
 
 # ---- Load data ----
 
-data = np.load(TEST_NPZ, allow_pickle=False)
+data = np.load(TRAIN_NPZ, allow_pickle=False)
 fps = data['fps'].astype(np.float32)
 labels = data['labels'].astype(np.int64)
 use_preproj = EMBED_SOURCE.lower() in {'preproj', 'encoder', 'g'}
-print("Loaded test set:", fps.shape)
+print("Loaded training set:", fps.shape)
 print(f"Model type: {model_type}, embed_dim: {embed_dim}, proj_dim: {proj_dim}")
 print(f"Using {'pre-projection' if use_preproj else 'projection'} embeddings for downstream training")
 
@@ -173,7 +173,7 @@ for start in range(0, len(fps), BATCH_SIZE):
 embeddings = np.vstack(embeddings)
 np.save(OUTPUT_EMBEDS, embeddings)
 np.save(OUTPUT_LABELS, labels)
-print("Saved embeddings to", OUTPUT_EMBEDS)
+print("Saved training embeddings to", OUTPUT_EMBEDS)
 
 
 # ---- Train downstream classifier ----
@@ -183,12 +183,12 @@ clf.fit(embeddings, labels)
 preds = clf.predict_proba(embeddings)[:, 1]
 auprc = average_precision_score(labels, preds)
 rocauc = roc_auc_score(labels, preds)
-print(f"LogReg AUPRC={auprc:.4f}, ROC-AUC={rocauc:.4f}")
+print(f"LogReg (train) AUPRC={auprc:.4f}, ROC-AUC={rocauc:.4f}")
 
 
 model_info = {
     "checkpoint": MODEL_CHECKPOINT,
-    "test_npz": TEST_NPZ,
+    "train_npz": TRAIN_NPZ,
     "embedding_file": OUTPUT_EMBEDS,
     "label_file": OUTPUT_LABELS,
     "model_type": model_type,
