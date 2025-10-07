@@ -21,16 +21,19 @@ TRAIN_NPZ = '../data/train/baseline_train_ecfp4.npz'
 VAL_NPZ = '../data/val/baseline_val_ecfp4.npz'
 NORMALIZE = False
 BATCH_SIZE = 2048  # per-GPU micro-batch size
-EPOCHS = 10
+EPOCHS = 50
 LR = 3e-4
 WEIGHT_DECAY = 1e-4
 TEMPERATURE = 0.05
-EMBED_DIM = 512
-PROJ_DIM = 256
+EMBED_DIM = 1024
+PROJ_DIM = 512
 SEED = 42
 SUBSET_SIZE = 4_000_000
-GRAD_ACCUM_STEPS = 4
+GRAD_ACCUM_STEPS = 16
 WARMUP_EPOCHS = 3
+
+model_filename = f"supcon_ddp_{MODEL_TYPE.lower()}_{timestamp}.pt"
+model_path =f"../models/{model_filename}"
 
 # ---- Utilities ----
 
@@ -448,8 +451,7 @@ def main():
                 "subset_size": SUBSET_SIZE,
             },
         }
-        model_filename = f"supcon_ddp_{MODEL_TYPE.lower()}_{timestamp}.pt"
-        model_path =f"../models/{model_filename}"
+        
         torch.save(checkpoint, model_path)
         print0(f"[Checkpoint] Saved model to {model_path}")
 
