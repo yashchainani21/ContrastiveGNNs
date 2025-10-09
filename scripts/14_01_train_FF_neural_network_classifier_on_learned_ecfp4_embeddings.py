@@ -15,7 +15,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score, accuracy_sco
 
 # ---- Configuration ----
 TRAIN_NPZ = "../data/train/baseline_train_ecfp4.npz"
-ENCODER_CHECKPOINT = "../models/supcon_ddp_resnet_20251006_100411.pt"  # update to actual filename
+ENCODER_CHECKPOINT = "../models/Molecular_ResNet_1024_512_100_epochs_w_weighted_loss.pt"  # update to actual filename
 EMBED_SOURCE = "preproj"  # "preproj" (encoder g) or "proj" (projection z)
 EMBED_BATCH_SIZE = 8192
 EMBED_NUM_WORKERS = 4
