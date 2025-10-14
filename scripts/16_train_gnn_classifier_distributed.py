@@ -36,14 +36,15 @@ VAL_PARQUET = "../data/val/baseline_val.parquet"
 EPOCHS = 100
 BATCH_SIZE = 128
 GRAD_ACCUM_STEPS = 1
-LR = 2e-4
+LR = 1e-4
 WEIGHT_DECAY = 1e-4
-HIDDEN_DIM = 256
-HEADS = (4, 4, 4)
-DROPOUT = 0.1
+HIDDEN_DIM = 512
+HEADS = (8, 8, 8, 8)
+DROPOUT = 0.2
 MESSAGE_PASSES = 3
 NUM_WORKERS = 4
 SEED = 42
+GRAD_CLIP_NORM = 1.0
 
 
 # ---- Distributed helpers ----
@@ -452,6 +453,11 @@ def main():
             find_unused_parameters=False,
         )
 
+    if get_rank() == 0:
+        param_source = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+        total_params = sum(p.numel() for p in param_source.parameters())
+        print0(f"Model parameter count: {total_params:,}")
+
     pos_weight = torch.tensor([pos_weight_value], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -491,11 +497,19 @@ def main():
             step_count += 1
 
             if is_sync:
+                if scaler.is_enabled():
+                    scaler.unscale_(optimizer)
+                params = model.module.parameters() if isinstance(model, nn.parallel.DistributedDataParallel) else model.parameters()
+                torch.nn.utils.clip_grad_norm_(params, GRAD_CLIP_NORM)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
         if accum_steps % GRAD_ACCUM_STEPS != 0:
+            if scaler.is_enabled():
+                scaler.unscale_(optimizer)
+            params = model.module.parameters() if isinstance(model, nn.parallel.DistributedDataParallel) else model.parameters()
+            torch.nn.utils.clip_grad_norm_(params, GRAD_CLIP_NORM)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
