@@ -24,7 +24,7 @@ from rdkit import Chem
 from rdkit import RDLogger
 from rdkit.Chem import rdchem
 from torch import distributed as dist
-from torch.utils.data import DataLoader, Dataset, DistributedSampler, Subset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -44,8 +44,6 @@ DROPOUT = 0.1
 MESSAGE_PASSES = 3
 NUM_WORKERS = 4
 SEED = 42
-NEGATIVE_DOWNSAMPLE = None  # set to an int to cap number of negatives
-POOL_RATIO = 0.5
 
 
 # ---- Distributed helpers ----
@@ -307,107 +305,6 @@ def scatter_mean(src, index, dim_size):
     return out / counts.unsqueeze(-1)
 
 
-class GraphAttentionReadout(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int):
-        super().__init__()
-        self.att_mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, node_feat: torch.Tensor, batch_index: torch.Tensor) -> torch.Tensor:
-        att_logits = self.att_mlp(node_feat).squeeze(-1)
-        max_vals = torch.zeros(batch_index.max().item() + 1 if batch_index.numel() > 0 else 0, device=node_feat.device)
-        max_vals.scatter_reduce_(0, batch_index, att_logits, reduce="amax")
-        att_logits = att_logits - max_vals[batch_index]
-        exp_logits = torch.exp(att_logits)
-        denom = torch.zeros_like(max_vals).scatter_add_(0, batch_index, exp_logits)
-        att_weights = exp_logits / (denom[batch_index] + 1e-16)
-        return scatter_sum(node_feat * att_weights.unsqueeze(-1), batch_index, max_vals.size(0))
-
-
-def scatter_sum(src, index, dim_size):
-    out = torch.zeros(dim_size, src.size(-1), device=src.device)
-    out.scatter_add_(0, index.unsqueeze(-1).expand(-1, src.size(-1)), src)
-    return out
-
-
-class HierarchicalPool(nn.Module):
-    def __init__(self, hidden_dim: int, edge_dim: int, dropout: float, ratio: float):
-        super().__init__()
-        self.score_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, 1),
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.ratio = ratio
-        self.edge_dim = edge_dim
-
-    def forward(
-        self,
-        node_feat: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attr: torch.Tensor,
-        batch_index: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if batch_index.numel() == 0:
-            return node_feat, edge_index, edge_attr, batch_index
-
-        scores = self.score_mlp(node_feat).squeeze(-1)
-        scores = self.dropout(scores)
-        num_graphs = int(batch_index.max().item()) + 1
-        mapping = torch.full((node_feat.size(0),), -1, dtype=torch.long, device=node_feat.device)
-        new_nodes = []
-        new_batches = []
-        new_edge_indices: List[torch.Tensor] = []
-        new_edge_attrs: List[torch.Tensor] = []
-        total = 0
-
-        for g in range(num_graphs):
-            mask = (batch_index == g)
-            idx = mask.nonzero(as_tuple=False).view(-1)
-            if idx.numel() == 0:
-                continue
-            k = max(1, int(torch.ceil(torch.tensor(self.ratio * idx.numel(), device=node_feat.device)).item()))
-            k = min(k, idx.numel())
-            topk = torch.topk(scores[idx], k, sorted=False).indices
-            selected = idx[topk]
-            mapping[selected] = torch.arange(selected.size(0), device=node_feat.device, dtype=torch.long)
-            new_nodes.append(node_feat[selected])
-            new_batches.append(torch.full((selected.size(0),), g, device=node_feat.device, dtype=torch.long))
-
-            if edge_index.numel() > 0:
-                mask_edge = (batch_index[edge_index[0]] == g) & (batch_index[edge_index[1]] == g)
-                if mask_edge.any():
-                    e0 = edge_index[0][mask_edge]
-                    e1 = edge_index[1][mask_edge]
-                    m0 = mapping[e0]
-                    m1 = mapping[e1]
-                    keep = (m0 >= 0) & (m1 >= 0)
-                    if keep.any():
-                        packed = torch.stack((m0[keep] + total, m1[keep] + total))
-                        new_edge_indices.append(packed)
-                        new_edge_attrs.append(edge_attr[mask_edge][keep])
-            mapping[selected] = -1
-            total += selected.size(0)
-
-        if total == 0:
-            return node_feat, edge_index, edge_attr, batch_index
-
-        x_pooled = torch.cat(new_nodes, dim=0)
-        batch_pooled = torch.cat(new_batches, dim=0)
-        if new_edge_indices:
-            edge_index_pooled = torch.cat(new_edge_indices, dim=1)
-            edge_attr_pooled = torch.cat(new_edge_attrs, dim=0)
-        else:
-            edge_index_pooled = torch.empty((2, 0), dtype=torch.long, device=node_feat.device)
-            edge_attr_pooled = torch.empty((0, self.edge_dim), dtype=edge_attr.dtype, device=edge_attr.device)
-
-        return x_pooled, edge_index_pooled, edge_attr_pooled, batch_pooled
-
-
 class MessagePassingLayer(nn.Module):
     def __init__(self, hidden_dim: int, dropout: float = DROPOUT):
         super().__init__()
@@ -428,33 +325,18 @@ class MessagePassingLayer(nn.Module):
 
 
 class GraphAttentionClassifier(nn.Module):
-    def __init__(
-        self,
-        node_dim,
-        edge_dim,
-        hidden_dim=HIDDEN_DIM,
-        heads=HEADS,
-        dropout=DROPOUT,
-        msg_passes=MESSAGE_PASSES,
-    ):
+    def __init__(self, node_dim, edge_dim, hidden_dim=HIDDEN_DIM, heads=HEADS, dropout=DROPOUT, msg_passes=MESSAGE_PASSES):
         super().__init__()
         self.input_proj = nn.Linear(node_dim, hidden_dim)
         self.layers = nn.ModuleList()
         self.norms = nn.ModuleList()
-        self.att_gates = nn.ModuleList()
         for h in heads:
             self.layers.append(GraphAttentionLayer(hidden_dim, hidden_dim, h, edge_dim, dropout))
             self.norms.append(nn.LayerNorm(hidden_dim))
-            self.att_gates.append(nn.Linear(hidden_dim, hidden_dim))
         self.message_layers = nn.ModuleList([MessagePassingLayer(hidden_dim, dropout) for _ in range(msg_passes)])
-        self.msg_gates = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(msg_passes)])
-        self.pool = HierarchicalPool(hidden_dim, edge_dim, dropout, POOL_RATIO)
-        self.post_pool_layer = GraphAttentionLayer(hidden_dim, hidden_dim, heads[-1], edge_dim, dropout)
-        self.post_pool_norm = nn.LayerNorm(hidden_dim)
-        self.post_pool_gate = nn.Linear(hidden_dim, hidden_dim)
-        self.readout = GraphAttentionReadout(hidden_dim, hidden_dim)
+        jk_dim = hidden_dim * (len(heads) + msg_passes)
         self.graph_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(jk_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
@@ -464,28 +346,21 @@ class GraphAttentionClassifier(nn.Module):
 
     def forward(self, node_feat, edge_index, batch_index, edge_attr):
         x = self.input_proj(node_feat)
-        for idx, (layer, norm) in enumerate(zip(self.layers, self.norms)):
+        jk_feats = []
+        for layer, norm in zip(self.layers, self.norms):
             residual = x
             x = layer(x, edge_index, edge_attr)
             x = norm(x)
             x = F.elu(x)
             x = F.dropout(x, p=DROPOUT, training=self.training)
-            gate = torch.sigmoid(self.att_gates[idx](x))
-            x = gate * x + (1 - gate) * residual
-        for idx, mp_layer in enumerate(self.message_layers):
-            residual = x
+            x = x + residual
+            jk_feats.append(x)
+        for mp_layer in self.message_layers:
             x = mp_layer(x, edge_index)
-            gate = torch.sigmoid(self.msg_gates[idx](x))
-            x = gate * x + (1 - gate) * residual
-        x, edge_index, edge_attr, batch_index = self.pool(x, edge_index, edge_attr, batch_index)
-        residual = x
-        x = self.post_pool_layer(x, edge_index, edge_attr)
-        x = self.post_pool_norm(x)
-        x = F.elu(x)
-        x = F.dropout(x, p=DROPOUT, training=self.training)
-        gate = torch.sigmoid(self.post_pool_gate(x))
-        x = gate * x + (1 - gate) * residual
-        graph_embed = self.readout(x, batch_index)
+            jk_feats.append(x)
+        concat_feats = torch.cat(jk_feats, dim=-1) if len(jk_feats) > 1 else jk_feats[0]
+        num_graphs = int(batch_index.max().item()) + 1 if batch_index.numel() > 0 else 0
+        graph_embed = scatter_mean(concat_feats, batch_index, num_graphs)
         graph_embed = self.graph_head(graph_embed)
         logits = self.classifier(graph_embed)
         return logits
@@ -511,7 +386,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
     logits = np.clip(logits, -50.0, 50.0)
     labels = torch.cat(labels_list, dim=0).numpy().ravel()
     probs = 1.0 / (1.0 + np.exp(-logits))
-    from sklearn.metrics import average_precision_score, roc_auc_score, accuracy_score, recall_score
+    from sklearn.metrics import average_precision_score, roc_auc_score, accuracy_score
 
     auprc = average_precision_score(labels, probs)
     try:
@@ -520,8 +395,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
         auroc = float("nan")
     preds = (probs >= 0.5).astype(np.float32)
     acc = accuracy_score(labels, preds)
-    recall = recall_score(labels, preds, zero_division=0)
-    return auprc, auroc, acc, recall
+    return auprc, auroc, acc
 
 
 # ---- Training loop ----
@@ -534,41 +408,10 @@ def main():
     world = get_world_size()
     print0(f"Using device {device} | rank={rank} | world={world}")
 
-    full_train_ds = MolecularGraphDataset(TRAIN_PARQUET)
-    train_labels_np = None
-    if NEGATIVE_DOWNSAMPLE is not None:
-        if get_rank() == 0:
-            print0(f"Downsampling negatives to at most {NEGATIVE_DOWNSAMPLE}")
-            idx_pos = [i for i, lbl in enumerate(full_train_ds.labels) if lbl == 1]
-            idx_neg = [i for i, lbl in enumerate(full_train_ds.labels) if lbl == 0]
-            if NEGATIVE_DOWNSAMPLE < len(idx_neg):
-                rng = np.random.default_rng(SEED)
-                idx_neg = rng.choice(idx_neg, size=NEGATIVE_DOWNSAMPLE, replace=False)
-            selected = np.concatenate([idx_pos, idx_neg]).astype(np.int64)
-            rng = np.random.default_rng(SEED)
-            rng.shuffle(selected)
-        else:
-            selected = None
-        if is_dist():
-            if get_rank() == 0:
-                tensor_idx = torch.tensor(selected, dtype=torch.int64)
-            else:
-                tensor_idx = torch.empty(0, dtype=torch.int64)
-            length_tensor = torch.tensor([tensor_idx.numel()], dtype=torch.int64)
-            dist.broadcast(length_tensor, src=0)
-            if get_rank() != 0:
-                tensor_idx = torch.empty(length_tensor.item(), dtype=torch.int64)
-            dist.broadcast(tensor_idx, src=0)
-            selected = tensor_idx.numpy()
-        train_ds = Subset(full_train_ds, selected.tolist())
-        train_labels_np = np.array(full_train_ds.labels)[selected]
-    else:
-        train_ds = full_train_ds
-        train_labels_np = np.array(full_train_ds.labels, dtype=np.int64)
+    train_ds = MolecularGraphDataset(TRAIN_PARQUET)
     val_ds = MolecularGraphDataset(VAL_PARQUET)
 
-    if train_labels_np is None:
-        train_labels_np = np.array(full_train_ds.labels, dtype=np.int64)
+    train_labels_np = np.array(train_ds.labels, dtype=np.int64)
     pos = max(int(train_labels_np.sum()), 1)
     neg = max(int(len(train_labels_np) - pos), 1)
     pos_weight_value = neg / pos
@@ -668,10 +511,9 @@ def main():
 
         # Validation on rank 0 only
         if get_rank() == 0:
-            val_auprc, val_auroc, val_acc, val_recall = evaluate(model if world == 1 else model.module, val_loader, device)
+            val_auprc, val_auroc, val_acc = evaluate(model if world == 1 else model.module, val_loader, device)
             print0(
-                f"Epoch {epoch:02d} | val_auprc={val_auprc:.4f} | val_auroc={val_auroc:.4f} | "
-                f"val_acc={val_acc:.4f} | val_recall={val_recall:.4f}"
+                f"Epoch {epoch:02d} | val_auprc={val_auprc:.4f}"
             )
             if val_auprc > best_val:
                 best_val = val_auprc
@@ -680,7 +522,6 @@ def main():
                     "val_auprc": val_auprc,
                     "val_auroc": val_auroc,
                     "val_acc": val_acc,
-                    "val_recall": val_recall,
                     "epoch": epoch,
                 }
 
