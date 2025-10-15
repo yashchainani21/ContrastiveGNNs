@@ -33,13 +33,13 @@ RDLogger.DisableLog("rdApp.*")
 TRAIN_PARQUET = "../data/train/baseline_train.parquet"
 VAL_PARQUET = "../data/val/baseline_val.parquet"
 
-EPOCHS = 100
+EPOCHS = 30
 BATCH_SIZE = 128
 GRAD_ACCUM_STEPS = 1
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 HIDDEN_DIM = 512
-HEADS = (8, 8, 8, 8)
+HEADS = (8, 8, 8, 8, 8, 8, 8, 8)
 DROPOUT = 0.2
 MESSAGE_PASSES = 3
 NUM_WORKERS = 4
