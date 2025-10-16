@@ -7,13 +7,14 @@ metrics on the validation set each epoch. Designed to be launched with
 `torchrun`.
 """
 
+import math
 import os
 import time
 import contextlib
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,7 @@ from rdkit import Chem
 from rdkit import RDLogger
 from rdkit.Chem import rdchem
 from torch import distributed as dist
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -33,7 +34,7 @@ RDLogger.DisableLog("rdApp.*")
 TRAIN_PARQUET = "../data/train/baseline_train.parquet"
 VAL_PARQUET = "../data/val/baseline_val.parquet"
 
-EPOCHS = 30
+EPOCHS = 50
 BATCH_SIZE = 128
 GRAD_ACCUM_STEPS = 1
 LR = 1e-4
@@ -45,6 +46,9 @@ MESSAGE_PASSES = 3
 NUM_WORKERS = 4
 SEED = 42
 GRAD_CLIP_NORM = 1.0
+NEGATIVE_SUBSAMPLE = None
+USE_WEIGHTED_SAMPLER = True
+POS_WEIGHT_BOOST = None  # override to float to pin a specific pos-vs-neg sampling weight
 
 
 # ---- Distributed helpers ----
@@ -194,10 +198,19 @@ class GraphSample:
 
 
 class MolecularGraphDataset(Dataset):
-    def __init__(self, parquet_path: str):
+    def __init__(self, parquet_path: str, negative_subsample: Optional[int] = None, seed: int = SEED):
         df = pd.read_parquet(parquet_path)
+        labels = (df["source"].astype(str) == "PKS").astype(np.int64)
+        if negative_subsample is not None:
+            pos_df = df[labels == 1]
+            neg_df = df[labels == 0]
+            if len(neg_df) > negative_subsample:
+                neg_df = neg_df.sample(n=negative_subsample, random_state=seed)
+            df = pd.concat([pos_df, neg_df], axis=0)
+            df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+            labels = (df["source"].astype(str) == "PKS").astype(np.int64)
         self.smiles = df["smiles"].astype(str).tolist()
-        self.labels = (df["source"].astype(str) == "PKS").astype(np.int64).to_numpy()
+        self.labels = labels.to_numpy()
         for smi in self.smiles:
             try:
                 sample = smiles_to_graph(smi)
@@ -215,6 +228,49 @@ class MolecularGraphDataset(Dataset):
     def __getitem__(self, idx: int) -> GraphSample:
         nf, ei, ea = smiles_to_graph(self.smiles[idx])
         return GraphSample(nf, ei, ea, int(self.labels[idx]))
+
+
+class RankAwareWeightedRandomSampler(Sampler[int]):
+    def __init__(
+        self,
+        weights: torch.Tensor,
+        num_samples: int,
+        *,
+        replacement: bool = True,
+        seed: int,
+        rank: int,
+        world: int,
+    ):
+        if weights.dim() != 1:
+            raise ValueError("weights tensor must be 1-dimensional")
+        if num_samples <= 0:
+            raise ValueError("num_samples must be positive")
+        self.weights = weights.to(dtype=torch.double).clamp_min(0)
+        if torch.sum(self.weights) <= 0:
+            raise ValueError("weights must sum to a positive value")
+        self.num_samples = num_samples
+        self.replacement = replacement
+        self.seed = int(seed)
+        self.rank = int(rank)
+        self.world = int(world)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __iter__(self) -> Iterator[int]:
+        generator = torch.Generator(device=self.weights.device)
+        generator.manual_seed(self.seed + self.rank + self.epoch * 9973)
+        sampled = torch.multinomial(
+            self.weights,
+            self.num_samples,
+            self.replacement,
+            generator=generator,
+        )
+        return iter(sampled.tolist())
+
+    def __len__(self) -> int:
+        return self.num_samples
 
 
 def collate_graphs(batch: List[GraphSample]) -> Dict[str, torch.Tensor]:
@@ -387,7 +443,14 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
     logits = np.clip(logits, -50.0, 50.0)
     labels = torch.cat(labels_list, dim=0).numpy().ravel()
     probs = 1.0 / (1.0 + np.exp(-logits))
-    from sklearn.metrics import average_precision_score, roc_auc_score, accuracy_score
+    from sklearn.metrics import (
+        accuracy_score,
+        average_precision_score,
+        f1_score,
+        precision_score,
+        recall_score,
+        roc_auc_score,
+    )
 
     auprc = average_precision_score(labels, probs)
     try:
@@ -396,7 +459,10 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
         auroc = float("nan")
     preds = (probs >= 0.5).astype(np.float32)
     acc = accuracy_score(labels, preds)
-    return auprc, auroc, acc
+    prec = precision_score(labels, preds, zero_division=0)
+    rec = recall_score(labels, preds, zero_division=0)
+    f1 = f1_score(labels, preds, zero_division=0)
+    return auprc, auroc, acc, prec, rec, f1
 
 
 # ---- Training loop ----
@@ -409,7 +475,7 @@ def main():
     world = get_world_size()
     print0(f"Using device {device} | rank={rank} | world={world}")
 
-    train_ds = MolecularGraphDataset(TRAIN_PARQUET)
+    train_ds = MolecularGraphDataset(TRAIN_PARQUET, negative_subsample=NEGATIVE_SUBSAMPLE, seed=SEED)
     val_ds = MolecularGraphDataset(VAL_PARQUET)
 
     train_labels_np = np.array(train_ds.labels, dtype=np.int64)
@@ -419,7 +485,29 @@ def main():
     if get_rank() == 0:
         print0(f"Class counts (train): pos={pos}, neg={neg}, pos_weight={pos_weight_value:.3f}")
 
-    train_sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank, shuffle=True)
+    if USE_WEIGHTED_SAMPLER:
+        labels_tensor = torch.from_numpy(train_labels_np)
+        pos_weight_sampling = float(POS_WEIGHT_BOOST) if POS_WEIGHT_BOOST is not None else pos_weight_value
+        sample_weights = torch.ones(len(labels_tensor), dtype=torch.double)
+        sample_weights[labels_tensor == 1] = pos_weight_sampling
+        sample_weights = sample_weights.clamp_min(1e-8)
+        samples_per_rank = math.ceil(len(train_ds) / max(world, 1))
+        train_sampler: Sampler[int] = RankAwareWeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=samples_per_rank,
+            replacement=True,
+            seed=SEED,
+            rank=rank,
+            world=world,
+        )
+        if get_rank() == 0:
+            print0(
+                "Weighted sampling enabled | "
+                f"pos_weight_for_sampling={pos_weight_sampling:.2f} | "
+                f"samples_per_rank={samples_per_rank}"
+            )
+    else:
+        train_sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_ds, num_replicas=world, rank=rank, shuffle=False)
 
     train_loader = DataLoader(
@@ -468,7 +556,8 @@ def main():
     best_state = None
 
     for epoch in range(1, EPOCHS + 1):
-        train_sampler.set_epoch(epoch)
+        if hasattr(train_sampler, "set_epoch"):
+            train_sampler.set_epoch(epoch)
         model.train()
         epoch_loss = 0.0
         step_count = 0
@@ -525,9 +614,16 @@ def main():
 
         # Validation on rank 0 only
         if get_rank() == 0:
-            val_auprc, val_auroc, val_acc = evaluate(model if world == 1 else model.module, val_loader, device)
+            (
+                val_auprc,
+                val_auroc,
+                val_acc,
+                val_prec,
+                val_rec,
+                val_f1,
+            ) = evaluate(model if world == 1 else model.module, val_loader, device)
             print0(
-                f"Epoch {epoch:02d} | val_auprc={val_auprc:.4f}"
+                f"Epoch {epoch:02d} | val_auprc={val_auprc:.4f} | val_precision={val_prec:.4f} | val_recall={val_rec:.4f} | val_f1={val_f1:.4f}"
             )
             if val_auprc > best_val:
                 best_val = val_auprc
@@ -536,6 +632,9 @@ def main():
                     "val_auprc": val_auprc,
                     "val_auroc": val_auroc,
                     "val_acc": val_acc,
+                    "val_precision": val_prec,
+                    "val_recall": val_rec,
+                    "val_f1": val_f1,
                     "epoch": epoch,
                 }
 
