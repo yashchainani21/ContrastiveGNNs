@@ -14,7 +14,7 @@ import bcs
 max_extension_modules = 3
 
 # set output filepath for saving generated (cluster, product) pairs
-output_filepath = f"../data/raw/bound_PKS_products_{max_extension_modules}_ext_mods.pkl"
+output_filepath = f"../data/raw/expanded_bound_PKS_products_{max_extension_modules}_ext_mods.pkl"
 
 def modify_bcs_starters_extenders(starter_codes: Optional[List[str]] = None,
                                   extender_codes: Optional[List[str]] = None):
@@ -46,7 +46,7 @@ def modify_bcs_starters_extenders(starter_codes: Optional[List[str]] = None,
 starter_codes = None 
 
 # for extenders, only allow Malonyl-CoA, Methylmalonyl-CoA, Ethylmalonyl-CoA, 
-extender_codes = ['Malonyl-CoA', 'Methylmalonyl-CoA']
+extender_codes = ['Malonyl-CoA', 'Methylmalonyl-CoA', 'emal']
 
 modify_bcs_starters_extenders(starter_codes = starter_codes, extender_codes = extender_codes)
 print((f"\nNumber of starter units: {len(bcs.starters)}"))

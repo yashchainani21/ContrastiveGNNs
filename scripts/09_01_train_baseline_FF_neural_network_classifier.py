@@ -9,7 +9,8 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch import distributed as dist
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from sklearn.metrics import average_precision_score, roc_auc_score, accuracy_score
 
 
@@ -78,6 +79,50 @@ class FFClassifier(nn.Module):
         return self.net(x)
 
 
+def is_dist() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def get_rank() -> int:
+    return dist.get_rank() if is_dist() else 0
+
+
+def get_world_size() -> int:
+    return dist.get_world_size() if is_dist() else 1
+
+
+def print0(*args, **kwargs):
+    if get_rank() == 0:
+        print(*args, **kwargs)
+
+
+def setup_distributed() -> torch.device:
+    if not dist.is_available():
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    rank_env = os.environ.get("RANK")
+    world_env = os.environ.get("WORLD_SIZE")
+    if rank_env is None or world_env is None:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if not dist.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend, init_method="env://")
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cpu")
+    return device
+
+
+def cleanup_distributed():
+    if is_dist():
+        dist.destroy_process_group()
+
+
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[float, float, float]:
     model.eval()
@@ -106,9 +151,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Tupl
 
 
 def main():
-    torch.backends.cudnn.benchmark = True
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+    device = setup_distributed()
+    rank = get_rank()
+    world = get_world_size()
+    print0(f"Using device: {device} | rank={rank} | world_size={world}")
 
     # Load splits
     df_train = load_split("train")
@@ -138,20 +186,41 @@ def main():
     nw_train = _suggest_workers(4)
     nw_eval = _suggest_workers(2)
     pin = device.type == "cuda"
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=nw_train, pin_memory=pin)
+    train_sampler = DistributedSampler(
+        train_ds,
+        num_replicas=world,
+        rank=rank,
+        shuffle=True,
+        drop_last=False,
+    ) if world > 1 else None
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=nw_train,
+        pin_memory=pin,
+    )
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=nw_eval, pin_memory=pin)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=nw_eval, pin_memory=pin)
 
     # Model
     input_dim = len(fp_cols)
     model = FFClassifier(input_dim=input_dim).to(device)
+    if world > 1:
+        print0("Wrapping classifier with DistributedDataParallel...")
+        model = nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[device.index] if device.type == "cuda" else None,
+            find_unused_parameters=False,
+        )
 
     # Class imbalance handling via pos_weight in BCEWithLogitsLoss
     y_train = (df_train["source"].astype(str) == "PKS").astype(np.int64)
     pos = max(int(y_train.sum()), 1)
     neg = max(int((1 - y_train).sum()), 1)
     pos_weight = torch.tensor([neg / pos], dtype=torch.float32, device=device)
-    print(f"Class counts (train): pos={pos}, neg={neg}, pos_weight={pos_weight.item():.3f}")
+    print0(f"Class counts (train): pos={pos}, neg={neg}, pos_weight={pos_weight.item():.3f}")
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
@@ -159,10 +228,14 @@ def main():
 
     best_val_auprc = -1.0
     best_state = None
-    epochs = 25
+    epochs = 100
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
+    best_val_auprc = -1.0
+    best_state = None
     for epoch in range(1, epochs + 1):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         model.train()
         epoch_loss = 0.0
         n_batches = 0
@@ -182,58 +255,77 @@ def main():
             n_batches += 1
         scheduler.step()
 
-        # Validation
-        val_auprc, val_auroc, val_acc = evaluate(model, val_loader, device)
-        avg_loss = epoch_loss / max(n_batches, 1)
-        dt = time.time() - t0
-        print(f"Epoch {epoch:02d} | loss={avg_loss:.4f} | val_auprc={val_auprc:.4f} | val_auroc={val_auroc:.4f} | val_acc={val_acc:.4f} | {dt:.1f}s")
+        loss_tensor = torch.tensor([epoch_loss, n_batches], dtype=torch.float32, device=device)
+        if is_dist():
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+        total_steps = int(loss_tensor[1].item())
+        avg_loss = loss_tensor[0].item() / max(total_steps, 1)
 
-        if val_auprc > best_val_auprc:
-            best_val_auprc = val_auprc
-            best_state = {"model": model.state_dict(), "epoch": epoch, "val_auprc": val_auprc}
+        if get_rank() == 0:
+            val_auprc, val_auroc, val_acc = evaluate(model if world == 1 else model.module, val_loader, device)
+            dt = time.time() - t0
+            print0(
+                f"Epoch {epoch:02d} | loss={avg_loss:.4f} | val_auprc={val_auprc:.4f} | "
+                f"val_auroc={val_auroc:.4f} | val_acc={val_acc:.4f} | {dt:.1f}s"
+            )
+            if val_auprc > best_val_auprc:
+                best_val_auprc = val_auprc
+                best_state = {
+                    "model": (model if world == 1 else model.module).state_dict(),
+                    "epoch": epoch,
+                    "val_auprc": val_auprc,
+                }
 
-    # Load best and evaluate on test
-    if best_state is not None:
-        model.load_state_dict(best_state["model"]) 
+        if is_dist():
+            dist.barrier()
 
-    val_auprc, val_auroc, val_acc = evaluate(model, val_loader, device)
-    test_auprc, test_auroc, test_acc = evaluate(model, test_loader, device)
-    print(f"Best Val AUPRC={val_auprc:.4f} | AUROC={val_auroc:.4f} | ACC={val_acc:.4f}")
-    print(f"Test  AUPRC={test_auprc:.4f} | AUROC={test_auroc:.4f} | ACC={test_acc:.4f}")
+    val_auprc = val_auroc = val_acc = test_auprc = test_auroc = test_acc = float("nan")
+    target_model = model if world == 1 else model.module
+    if get_rank() == 0 and best_state is not None:
+        target_model.load_state_dict(best_state["model"])
+        val_auprc, val_auroc, val_acc = evaluate(target_model, val_loader, device)
+        test_auprc, test_auroc, test_acc = evaluate(target_model, test_loader, device)
+        print0(f"Best Val AUPRC={val_auprc:.4f} | AUROC={val_auroc:.4f} | ACC={val_acc:.4f}")
+        print0(f"Test  AUPRC={test_auprc:.4f} | AUROC={test_auroc:.4f} | ACC={test_acc:.4f}")
 
-    # Save model and metadata
-    out_dir = Path("../models")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    model_path = out_dir / "baseline_ffnn_pks_classifier.pt"
-    meta_path = out_dir / "baseline_ffnn_pks_classifier.meta.json"
-    torch.save({
-        "state_dict": model.state_dict(),
-        "input_dim": input_dim,
-        "hidden": [512, 256],
-        "pos_weight": pos_weight.item(),
-        "best_val_auprc": float(val_auprc),
-        "best_val_auroc": float(val_auroc),
-        "best_val_acc": float(val_acc),
-        "test_auprc": float(test_auprc),
-        "test_auroc": float(test_auroc),
-        "test_acc": float(test_acc),
-    }, model_path)
-
-    with open(meta_path, "w") as f:
-        json.dump({
-            "model_path": str(model_path),
+    if get_rank() == 0:
+        target_model = model if world == 1 else model.module
+        out_dir = Path("../models")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        model_path = out_dir / "baseline_ffnn_pks_classifier.pt"
+        meta_path = out_dir / "baseline_ffnn_pks_classifier.meta.json"
+        torch.save({
+            "state_dict": target_model.state_dict(),
             "input_dim": input_dim,
             "hidden": [512, 256],
-            "batch_size": batch_size,
-            "epochs": epochs,
-            "device": str(device),
-            "class_counts": {"pos": int(pos), "neg": int(neg)},
-            "pos_weight": float(pos_weight.item()),
-            "val_metrics": {"auprc": float(val_auprc), "auroc": float(val_auroc), "acc": float(val_acc)},
-            "test_metrics": {"auprc": float(test_auprc), "auroc": float(test_auroc), "acc": float(test_acc)},
-        }, f, indent=2)
+            "pos_weight": pos_weight.item(),
+            "best_val_auprc": float(val_auprc),
+            "best_val_auroc": float(val_auroc),
+            "best_val_acc": float(val_acc),
+            "test_auprc": float(test_auprc),
+            "test_auroc": float(test_auroc),
+            "test_acc": float(test_acc),
+        }, model_path)
 
-    print(f"Saved model to {model_path} and metadata to {meta_path}")
+        with open(meta_path, "w") as f:
+            json.dump({
+                "model_path": str(model_path),
+                "input_dim": input_dim,
+                "hidden": [512, 256],
+                "batch_size": batch_size,
+                "epochs": epochs,
+                "device": str(device),
+                "class_counts": {"pos": int(pos), "neg": int(neg)},
+                "pos_weight": float(pos_weight.item()),
+                "val_metrics": {"auprc": float(val_auprc), "auroc": float(val_auroc), "acc": float(val_acc)},
+                "test_metrics": {"auprc": float(test_auprc), "auroc": float(test_auroc), "acc": float(test_acc)},
+            }, f, indent=2)
+
+        print0(f"Saved model to {model_path} and metadata to {meta_path}")
+
+    if is_dist():
+        dist.barrier()
+    cleanup_distributed()
 
 
 if __name__ == "__main__":

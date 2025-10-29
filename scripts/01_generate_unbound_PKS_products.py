@@ -8,9 +8,9 @@ remove_stereochemistry = True
 max_extension_modules = 3
 
 if remove_stereochemistry:
-    output_filepath = f"../data/interim/unbound_PKS_products_{max_extension_modules}_ext_mods_no_stereo.pkl"
+    output_filepath = f"../data/interim/expanded_unbound_PKS_products_{max_extension_modules}_ext_mods_no_stereo.pkl"
 else:
-    output_filepath = f"../data/interim/unbound_PKS_products_{max_extension_modules}_ext_mods_with_stereo.pkl"
+    output_filepath = f"../data/interim/expanded_unbound_PKS_products_{max_extension_modules}_ext_mods_with_stereo.pkl"
 
 def run_pks_release_reaction(pks_release_mechanism: str,
                              bound_product_mol: Chem.Mol) -> List[Chem.Mol]:
@@ -60,7 +60,7 @@ def run_pks_release_reaction(pks_release_mechanism: str,
 
     raise ValueError(f"Unsupported PKS release mechanism: {pks_release_mechanism}")
 
-with open(f"../data/raw/bound_PKS_products_{max_extension_modules}_ext_mods.pkl", "rb") as f:
+with open(f"../data/raw/expanded_bound_PKS_products_{max_extension_modules}_ext_mods.pkl", "rb") as f:
     bound_PKS_products = pickle.load(f)
 
 PKS_designs = [bound_PKS_products[i][0] for i in range(len(bound_PKS_products))]

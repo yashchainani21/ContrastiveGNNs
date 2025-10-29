@@ -13,13 +13,13 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler, TensorData
 from sklearn.metrics import average_precision_score, roc_auc_score, accuracy_score
 
 
-# ---- Configuration ----
+# ---- Configuration ----# 
 TRAIN_NPZ = "../data/train/baseline_train_ecfp4.npz"
 ENCODER_CHECKPOINT = "../models/Molecular_ResNet_1024_512_100_epochs_w_weighted_loss.pt"  # update to actual filename
 EMBED_SOURCE = "preproj"  # "preproj" (encoder g) or "proj" (projection z)
-EMBED_BATCH_SIZE = 8192
+EMBED_BATCH_SIZE = 2048
 EMBED_NUM_WORKERS = 4
-
+epochs = 100
 
 def load_split_npz(path: str) -> Tuple[np.ndarray, np.ndarray]:
     data = np.load(path, allow_pickle=False)
@@ -330,6 +330,7 @@ def main():
 
     print0("Building dataset and DataLoader...")
     train_ds = EmbeddingDataset(train_embeddings, train_labels)
+    input_dim = train_ds.X.shape[1]
     del train_embeddings
 
     # Choose conservative DataLoader worker count to avoid warnings on constrained systems
@@ -363,7 +364,6 @@ def main():
     )
 
     # Model
-    input_dim = train_embeddings.shape[1]
     print0("Initialising feed-forward classifier...")
     model = FFClassifier(input_dim=input_dim).to(device)
     if world > 1:
@@ -384,7 +384,6 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20)
 
-    epochs = 25
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
     print0("Starting training loop...")
@@ -433,8 +432,8 @@ def main():
 
         out_dir = Path("../models")
         out_dir.mkdir(parents=True, exist_ok=True)
-        model_path = out_dir / "baseline_ffnn_pks_classifier.pt"
-        meta_path = out_dir / "baseline_ffnn_pks_classifier.meta.json"
+        model_path = out_dir / "learned_ecfp_resnet_embedding_ffnn_pks_classifier.pt"
+        meta_path = out_dir / "learned_ecfp_resnet_embedding_ffnn_pks_classifier.meta.json"
         torch.save(
             {
                 "state_dict": target_model.state_dict(),

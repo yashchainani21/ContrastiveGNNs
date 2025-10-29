@@ -31,10 +31,12 @@ RDLogger.DisableLog("rdApp.*")
 
 
 # ---- Configuration ----
-TRAIN_PARQUET = "../data/train/baseline_train.parquet"
-VAL_PARQUET = "../data/val/baseline_val.parquet"
+TRAIN_PARQUET = "../data/train/expanded_train.parquet"
+#TRAIN_PARQUET = "../data/train/baseline_train.parquet"
+VAL_PARQUET = "../data/val/expanded_val.parquet"
+#VAL_PARQUET = "../data/val/baseline_val.parquet"
 
-EPOCHS = 50
+EPOCHS = 100
 BATCH_SIZE = 128
 GRAD_ACCUM_STEPS = 1
 LR = 1e-4
@@ -48,7 +50,7 @@ SEED = 42
 GRAD_CLIP_NORM = 1.0
 NEGATIVE_SUBSAMPLE = None
 USE_WEIGHTED_SAMPLER = True
-POS_WEIGHT_BOOST = None  # override to float to pin a specific pos-vs-neg sampling weight
+POS_WEIGHT_BOOST = 100  # override to float to pin a specific pos-vs-neg sampling weight
 
 
 # ---- Distributed helpers ----
@@ -384,6 +386,10 @@ class MessagePassingLayer(nn.Module):
 class GraphAttentionClassifier(nn.Module):
     def __init__(self, node_dim, edge_dim, hidden_dim=HIDDEN_DIM, heads=HEADS, dropout=DROPOUT, msg_passes=MESSAGE_PASSES):
         super().__init__()
+        self.head_config = tuple(heads)
+        self.msg_passes = msg_passes
+        self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout
         self.input_proj = nn.Linear(node_dim, hidden_dim)
         self.layers = nn.ModuleList()
         self.norms = nn.ModuleList()
@@ -423,13 +429,44 @@ class GraphAttentionClassifier(nn.Module):
         return logits
 
 
+def describe_model_architecture(model: GraphAttentionClassifier) -> List[str]:
+    lines = []
+    lines.append(
+        f"Input projection: Linear({model.input_proj.in_features} -> {model.input_proj.out_features})"
+    )
+    for idx, (layer, heads) in enumerate(zip(model.layers, model.head_config), start=1):
+        lines.append(
+            f"Attention block {idx}: GraphAttentionLayer(hidden={model.hidden_dim}, heads={heads})"
+        )
+    for idx, mp in enumerate(model.message_layers, start=1):
+        lines.append(
+            f"Message block {idx}: Linear({mp.lin.in_features} -> {mp.lin.out_features}) + LayerNorm"
+        )
+    jk_dim = model.hidden_dim * (len(model.head_config) + model.msg_passes)
+    lines.append(f"Jumping-knowledge concat dim: {jk_dim}")
+    if isinstance(model.graph_head, nn.Sequential):
+        for idx, module in enumerate(model.graph_head, start=1):
+            if isinstance(module, nn.Linear):
+                lines.append(
+                    f"Graph head Linear {idx}: {module.in_features} -> {module.out_features}"
+                )
+            else:
+                lines.append(f"Graph head {idx}: {module.__class__.__name__}")
+    lines.append(
+        f"Classifier: Linear({model.classifier.in_features} -> {model.classifier.out_features})"
+    )
+    return lines
+
+
 # ---- Metrics ----
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
+def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, criterion: Optional[nn.Module] = None):
     model.eval()
     logits_list = []
     labels_list = []
+    loss_total = 0.0
+    loss_count = 0
     for batch in loader:
         node_feat = batch["node_feat"].to(device, non_blocking=True)
         edge_index = batch["edge_index"].to(device, non_blocking=True)
@@ -439,6 +476,10 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
         logits = model(node_feat, edge_index, batch_index, edge_attr)
         logits_list.append(logits.detach().cpu())
         labels_list.append(labels.detach().cpu())
+        if criterion is not None:
+            loss = criterion(logits, labels)
+            loss_total += loss.item() * labels.size(0)
+            loss_count += labels.size(0)
     logits = torch.cat(logits_list, dim=0).numpy().ravel()
     logits = np.clip(logits, -50.0, 50.0)
     labels = torch.cat(labels_list, dim=0).numpy().ravel()
@@ -462,7 +503,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
     prec = precision_score(labels, preds, zero_division=0)
     rec = recall_score(labels, preds, zero_division=0)
     f1 = f1_score(labels, preds, zero_division=0)
-    return auprc, auroc, acc, prec, rec, f1
+    mean_loss = loss_total / max(loss_count, 1) if criterion is not None else float("nan")
+    return mean_loss, auprc, auroc, acc, prec, rec, f1
 
 
 # ---- Training loop ----
@@ -545,15 +587,37 @@ def main():
         param_source = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
         total_params = sum(p.numel() for p in param_source.parameters())
         print0(f"Model parameter count: {total_params:,}")
+        print0("Model architecture:")
+        for line in describe_model_architecture(param_source):
+            print0(f"  {line}")
 
     pos_weight = torch.tensor([pos_weight_value], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=3,
+        threshold=1e-4,
+        threshold_mode="rel",
+        cooldown=0,
+        min_lr=1e-6,
+        verbose=(get_rank() == 0),
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
     best_val = -1.0
     best_state = None
+    val_history = {
+        "loss": [],
+        "auprc": [],
+        "auroc": [],
+        "accuracy": [],
+        "precision": [],
+        "recall": [],
+        "f1": [],
+    }
 
     for epoch in range(1, EPOCHS + 1):
         if hasattr(train_sampler, "set_epoch"):
@@ -603,28 +667,37 @@ def main():
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
-        scheduler.step()
         loss_tensor = torch.tensor([epoch_loss, step_count], device=device, dtype=torch.float32)
         if is_dist():
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
         steps = int(loss_tensor[1].item())
         mean_loss = loss_tensor[0].item() / max(steps, 1)
         if get_rank() == 0:
-            print0(f"Epoch {epoch:02d} | train_loss={mean_loss:.4f} | time={time.time()-t0:.1f}s")
+            current_lr = optimizer.param_groups[0]["lr"]
+            print0(f"Epoch {epoch:02d} | train_loss={mean_loss:.4f} | lr={current_lr:.2e} | time={time.time()-t0:.1f}s")
 
-        # Validation on rank 0 only
+        # Validation + LR scheduling (loss-aware)
+        val_loss_value = 0.0
         if get_rank() == 0:
             (
+                val_loss_value,
                 val_auprc,
                 val_auroc,
                 val_acc,
                 val_prec,
                 val_rec,
                 val_f1,
-            ) = evaluate(model if world == 1 else model.module, val_loader, device)
+            ) = evaluate(model if world == 1 else model.module, val_loader, device, criterion=criterion)
             print0(
-                f"Epoch {epoch:02d} | val_auprc={val_auprc:.4f} | val_precision={val_prec:.4f} | val_recall={val_rec:.4f} | val_f1={val_f1:.4f}"
+                f"Epoch {epoch:02d} | val_loss={val_loss_value:.4f} | val_auprc={val_auprc:.4f} | val_precision={val_prec:.4f} | val_recall={val_rec:.4f} | val_f1={val_f1:.4f}"
             )
+            val_history["loss"].append(val_loss_value)
+            val_history["auprc"].append(val_auprc)
+            val_history["auroc"].append(val_auroc)
+            val_history["accuracy"].append(val_acc)
+            val_history["precision"].append(val_prec)
+            val_history["recall"].append(val_rec)
+            val_history["f1"].append(val_f1)
             if val_auprc > best_val:
                 best_val = val_auprc
                 best_state = {
@@ -635,18 +708,30 @@ def main():
                     "val_precision": val_prec,
                     "val_recall": val_rec,
                     "val_f1": val_f1,
+                    "val_loss": val_loss_value,
                     "epoch": epoch,
                 }
+
+        val_loss_tensor = torch.tensor([val_loss_value], device=device, dtype=torch.float32)
+        if is_dist():
+            dist.broadcast(val_loss_tensor, src=0)
+        scheduler.step(val_loss_tensor.item())
 
         if is_dist():
             dist.barrier()
 
-    if get_rank() == 0 and best_state is not None:
+    if get_rank() == 0:
         out_dir = Path("../models")
         out_dir.mkdir(parents=True, exist_ok=True)
-        save_path = out_dir / f"GNN_classifier_w_attn_and_MPNN_{EPOCHS}ep_JK.pt"
-        torch.save(best_state, save_path)
-        print0(f"Saved best model to {save_path}")
+        for metric_name, values in val_history.items():
+            history_path = out_dir / f"val_{metric_name}_history.txt"
+            with history_path.open("w", encoding="utf-8") as fp:
+                for idx, value in enumerate(values, start=1):
+                    fp.write(f"{idx}\t{value:.6f}\n")
+        if best_state is not None:
+            save_path = out_dir / f"GNN_classifier_w_attn_and_MPNN_{EPOCHS}ep_JK.pt"
+            torch.save(best_state, save_path)
+            print0(f"Saved best model to {save_path}")
 
     cleanup_dist()
 

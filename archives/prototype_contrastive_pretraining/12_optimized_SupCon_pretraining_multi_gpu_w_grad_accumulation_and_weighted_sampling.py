@@ -3,6 +3,7 @@ import math
 import os
 import datetime
 import numpy as np
+import contextlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,16 +20,20 @@ MODEL_TYPE = "resnet"  # "mlp" | "cnn" | "resnet"
 TRAIN_NPZ = '../data/train/baseline_train_ecfp4.npz'
 VAL_NPZ = '../data/val/baseline_val_ecfp4.npz'
 NORMALIZE = False
-BATCH_SIZE = 2048  # per-GPU batch size
-EPOCHS = 2
+BATCH_SIZE = 2048  # per-GPU micro-batch size
+EPOCHS = 50
 LR = 3e-4
 WEIGHT_DECAY = 1e-4
 TEMPERATURE = 0.05
-EMBED_DIM = 512
-PROJ_DIM = 256
+EMBED_DIM = 1024
+PROJ_DIM = 512
 SEED = 42
 SUBSET_SIZE = 4_000_000
+GRAD_ACCUM_STEPS = 16
+WARMUP_EPOCHS = 3
 
+model_filename = f"Molecular_ResNet_{EMBED_DIM}_{PROJ_DIM}_{EPOCHS}_epochs.pt"
+model_path =f"../models/{model_filename}"
 
 # ---- Utilities ----
 
@@ -255,29 +260,40 @@ class TinyMLP(nn.Module):
 
 
 class SupConLoss(nn.Module):
-    def __init__(self, temperature: float = 0.1, eps: float = 1e-8):
+    def __init__(self, temperature: float = 0.1, eps: float = 1e-8, pos_weight: float = 1.5):
         super().__init__()
         self.tau = temperature
         self.eps = eps
+        self.pos_weight = pos_weight
 
     def forward(self, z: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         B = z.size(0)
         z = F.normalize(z.float(), dim=-1, eps=self.eps)
         sim = (z @ z.t()) / self.tau
         eye = torch.eye(B, dtype=torch.bool, device=z.device)
-        labels = labels.view(-1, 1)
-        pos_mask = (labels == labels.t()) & (~eye)
+        labels = labels.view(-1)
+        pos_mask = (labels.view(-1, 1) == labels.view(1, -1)) & (~eye)
         valid_mask = pos_mask.sum(1) > 0
         if not valid_mask.any():
             return torch.tensor(0.0, device=z.device, requires_grad=True)
         sim = sim[valid_mask]
         pos_mask = pos_mask[valid_mask]
         sim = sim - sim.max(dim=1, keepdim=True).values
-        denom = torch.logsumexp(sim, dim=1, keepdim=True)
+        denom = torch.logsumexp(sim, dim=1, keepdim=True) + self.eps
         log_prob = sim - denom
         pos_counts = pos_mask.sum(1).clamp_min(1)
         pos_log_prob = (pos_mask * log_prob).sum(1) / pos_counts
-        return -pos_log_prob.mean()
+
+        # --- NEW: weight positives more heavily ---
+        # class_weights = torch.where(labels.squeeze(1) == 1, self.pos_weight, 1.0)
+
+        class_weights = torch.ones_like(labels, dtype=pos_log_prob.dtype, device=z.device)
+        class_weights[labels == 1] = self.pos_weight
+        class_weights = class_weights[valid_mask]
+
+        loss = -(class_weights * pos_log_prob).mean()
+        return loss
+        #return -pos_log_prob.mean()
 
 
 # ---- Main ----
@@ -287,6 +303,7 @@ def main():
     rank = get_rank()
     world = get_world_size()
     print0(f"DDP initialized: rank={rank}, world={world}, device={device}")
+    print0(f"Using {world} GPU{'s' if world != 1 else ''} with grad accumulation steps = {GRAD_ACCUM_STEPS}")
     print0(f"Using {world} GPU{'s' if world != 1 else ''} for training")
 
     torch.set_num_threads(1)
@@ -326,12 +343,32 @@ def main():
     train_ds = Subset(base_train, sel_idx_np.tolist())
 
     print0("Subset stats:",
-           "pos =", int((labels_all[sel_idx_np] == 1).sum()),
-           "neg =", int((labels_all[sel_idx_np] == 0).sum()),
-           "total =", len(sel_idx_np))
+       "pos =", int((labels_all[sel_idx_np] == 1).sum()),
+       "neg =", int((labels_all[sel_idx_np] == 0).sum()),
+       "total =", len(sel_idx_np))
 
-    sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank,
-                                 shuffle=True, drop_last=False)
+    # ---- Balanced Weighted Sampler (DDP-compatible) ----
+    labels_subset = labels_all[sel_idx_np]
+
+    # Compute inverse-frequency weights for balanced sampling
+    pos_weight = len(labels_subset) / (2.0 * (labels_subset == 1).sum())
+    neg_weight = len(labels_subset) / (2.0 * (labels_subset == 0).sum())
+    weights_np = np.where(labels_subset == 1, pos_weight, neg_weight).astype(np.float32)
+
+    if world > 1:
+        # Each rank gets its own balanced weighted sampler
+        weights_split = np.array_split(weights_np, world)[rank]
+        weights_tensor = torch.tensor(weights_split, dtype=torch.float32)
+        sampler = torch.utils.data.WeightedRandomSampler(
+            weights_tensor, num_samples=len(weights_tensor), replacement=True
+        )
+    else:
+        # Single-GPU: use full weighted sampler
+        weights_tensor = torch.tensor(weights_np, dtype=torch.float32)
+        sampler = torch.utils.data.WeightedRandomSampler(
+            weights_tensor, num_samples=len(weights_tensor), replacement=True
+        )
+
     train_loader = DataLoader(
         train_ds,
         batch_size=BATCH_SIZE,
@@ -339,6 +376,7 @@ def main():
         num_workers=0,
         pin_memory=torch.cuda.is_available(),
     )
+    
 
     model = build_model(model_type=MODEL_TYPE, fp_dim=2048,
                         embed_dim=EMBED_DIM, proj_dim=PROJ_DIM).to(device)
@@ -346,48 +384,77 @@ def main():
     if world > 1:
         model = nn.parallel.DistributedDataParallel(model, device_ids=[device.index] if device.type == 'cuda' else None)
 
-    criterion = SupConLoss(temperature=TEMPERATURE).to(device)
+    #criterion = SupConLoss(temperature=TEMPERATURE).to(device)
+    criterion = SupConLoss(temperature=TEMPERATURE, pos_weight=1.5).to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum=0.9,
                                 weight_decay=WEIGHT_DECAY, nesterov=True)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+
+    def cosine_warmup_lambda(epoch: int) -> float:
+        if WARMUP_EPOCHS > 0 and epoch < WARMUP_EPOCHS:
+            return (epoch + 1) / max(1, WARMUP_EPOCHS)
+        if epoch >= EPOCHS:
+            return 0.0
+        if EPOCHS <= WARMUP_EPOCHS:
+            return 1.0
+        progress = (epoch - WARMUP_EPOCHS) / max(1, EPOCHS - WARMUP_EPOCHS)
+        progress = max(0.0, min(1.0, progress))
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, cosine_warmup_lambda)
     scaler = amp.GradScaler(device.type)
 
     print0("Train size:", len(train_ds))
 
     for epoch in range(1, EPOCHS + 1):
-        sampler.set_epoch(epoch)
+        #sampler.set_epoch(epoch)
         model.train()
         epoch_loss = 0.0
         steps = 0
+        accum_count = 0
+        optimizer.zero_grad(set_to_none=True)
 
         for xb, yb in train_loader:
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
 
-            with amp.autocast(device.type, dtype=torch.float16 if device.type == 'cuda' else torch.bfloat16):
-                outputs = model(xb)
-                if isinstance(outputs, tuple):
-                    _, z = outputs
-                else:
-                    z = outputs
-                if yb.unique().numel() < 2:
-                    # Keep ranks in sync by contributing a zero loss when the batch lacks positives.
-                    loss = criterion(z.clone(), yb.clone()) * 0.0
-                else:
-                    loss = criterion(z, yb)
+            is_sync_step = ((accum_count + 1) % GRAD_ACCUM_STEPS == 0) or (world == 1)
+            sync_ctx = contextlib.nullcontext() if is_sync_step else model.no_sync()
+            with sync_ctx:
+                with amp.autocast(device.type, dtype=torch.float16 if device.type == 'cuda' else torch.bfloat16):
+                    outputs = model(xb)
+                    if isinstance(outputs, tuple):
+                        _, z = outputs
+                    else:
+                        z = outputs
+                    #if yb.unique().numel() < 2:
+                    #    loss_full = z.sum() * 0.0
+                    #else:
+                    #    loss_full = criterion(z, yb)
+                    loss_full = criterion(z, yb)
+                    loss = loss_full / GRAD_ACCUM_STEPS
 
-            if not torch.isfinite(loss):
-                continue
+                if not torch.isfinite(loss_full):
+                    loss_full = z.sum() * 0.0
+                    loss = loss_full / GRAD_ACCUM_STEPS
 
-            scaler.scale(loss).backward()
+                scaler.scale(loss).backward()
+
+            accum_count += 1
+            steps += 1
+            epoch_loss += loss_full.item()
+
+            if (accum_count % GRAD_ACCUM_STEPS == 0) or (world == 1 and is_sync_step):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+        if accum_count % GRAD_ACCUM_STEPS != 0 and accum_count > 0:
             scaler.step(optimizer)
             scaler.update()
-
-            epoch_loss += loss.item()
-            steps += 1
+            optimizer.zero_grad(set_to_none=True)
 
         scheduler.step()
+        current_lr = optimizer.param_groups[0]['lr']
 
         loss_steps = torch.tensor([epoch_loss, steps], dtype=torch.float32, device=device)
         if is_dist():
@@ -398,7 +465,7 @@ def main():
             print0(f"[Epoch {epoch:03d}] all batches skipped")
         else:
             mean_loss = loss_steps[0].item() / total_steps
-            print0(f"[Epoch {epoch:03d}] train_supcon={mean_loss:.4f}")
+            print0(f"[Epoch {epoch:03d}] train_supcon={mean_loss:.4f}, lr={current_lr:.3e}")
 
     if get_rank() == 0:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -418,8 +485,7 @@ def main():
                 "subset_size": SUBSET_SIZE,
             },
         }
-        model_filename = f"supcon_ddp_{MODEL_TYPE.lower()}_{timestamp}.pt"
-        model_path =f"../models/{model_filename}"
+        
         torch.save(checkpoint, model_path)
         print0(f"[Checkpoint] Saved model to {model_path}")
 

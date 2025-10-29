@@ -11,7 +11,7 @@ max_extension_modules = 3
 num_bio_steps = 1
 num_chem_steps = 1
 
-input_base = f"../data/processed/all_PKS_and_non_PKS_molecules_{max_extension_modules}_BIO{num_bio_steps}_CHEM{num_chem_steps}_no_stereo"
+input_base = f"../data/processed/expanded_all_PKS_and_non_PKS_molecules_{max_extension_modules}_BIO{num_bio_steps}_CHEM{num_chem_steps}_no_stereo"
 input_parquet = input_base + ".parquet"
 input_csv = input_base + ".csv"
 
@@ -38,12 +38,12 @@ def ensure_columns(df: pd.DataFrame):
 
 def save_df(df: pd.DataFrame, out_dir: Path, name: str):
     out_dir.mkdir(parents=True, exist_ok=True)
-    parquet_path = out_dir / f"baseline_{name}.parquet"
+    parquet_path = out_dir / f"expanded_{name}.parquet"
     try:
         df.to_parquet(parquet_path, index=False)
         print(f"Saved {name} to {parquet_path} ({len(df)} rows)")
     except Exception as e:
-        csv_path = out_dir / f"baseline_{name}.csv"
+        csv_path = out_dir / f"expanded_{name}.csv"
         df.to_csv(csv_path, index=False)
         print(f"Parquet save failed ({e}); saved {name} CSV to {csv_path} ({len(df)} rows)")
 

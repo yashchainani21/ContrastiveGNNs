@@ -1,21 +1,36 @@
+
+import math
 import os
 import datetime
 import numpy as np
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
+from torch import distributed as dist
+from torch import amp
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
-
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import average_precision_score
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 
+# ---- Hyperparameters ----
 
-# -------------------- Utilities --------------------
+MODEL_TYPE = "resnet"  # "mlp" | "cnn" | "resnet"
+TRAIN_NPZ = '../data/train/baseline_train_ecfp4.npz'
+VAL_NPZ = '../data/val/baseline_val_ecfp4.npz'
+NORMALIZE = False
+BATCH_SIZE = 512  # per-GPU batch size
+EPOCHS = 10
+LR = 3e-4
+WEIGHT_DECAY = 1e-4
+TEMPERATURE = 0.05
+EMBED_DIM = 512
+PROJ_DIM = 256
+SEED = 42
+SUBSET_SIZE = 4_000_000
+
+# ---- Utilities ----
+
 def is_dist() -> bool:
     return dist.is_available() and dist.is_initialized()
 
@@ -28,94 +43,43 @@ def get_world_size() -> int:
     return dist.get_world_size() if is_dist() else 1
 
 
+def print0(*args, **kwargs):
+    if get_rank() == 0:
+        print(*args, **kwargs)
+
+
 def setup_distributed() -> torch.device:
-    """Initialize torch.distributed using environment variables set by torchrun."""
     if not dist.is_available():
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    rank_env = os.environ.get('RANK')
+    world_env = os.environ.get('WORLD_SIZE')
+    if rank_env is None or world_env is None:
+        # Running in single-process mode (e.g., notebook or python script)
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     if not dist.is_initialized():
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend, init_method="env://")
+        backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+        dist.init_process_group(backend=backend, init_method='env://')
 
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
-        device = torch.device("cuda", local_rank)
+        device = torch.device('cuda', local_rank)
     else:
-        device = torch.device("cpu")
+        device = torch.device('cpu')
     return device
 
 
 def barrier():
     if is_dist():
         dist.barrier()
-
-
-def print0(*args, **kwargs):
-    if get_rank() == 0:
-        print(*args, **kwargs)
-
-
-def visualize_tsne(model, dataset, device, max_samples=2000, seed=42, save_prefix="tsne_embeddings"):
-    if get_rank() != 0:
-        return
-    model.eval()
-    rng = np.random.default_rng(seed)
-    idx = rng.choice(len(dataset), size=min(max_samples, len(dataset)), replace=False)
-    xs, ys = [], []
-    with torch.no_grad():
-        for i in idx:
-            x, y = dataset[i]
-            xs.append(x.numpy())
-            ys.append(y)
-    X_raw = np.stack(xs)
-    y_all = np.array(ys)
-
-    xb = torch.from_numpy(X_raw).to(device)
-    with torch.no_grad():
-        g, z = model(xb)
-    X_embed = g.cpu().numpy()
-
-    tsne_raw = TSNE(n_components=2, random_state=seed, perplexity=30).fit_transform(X_raw)
-    tsne_embed = TSNE(n_components=2, random_state=seed, perplexity=30).fit_transform(X_embed)
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    sc0 = axes[0].scatter(tsne_raw[:, 0], tsne_raw[:, 1], c=y_all, cmap="coolwarm", alpha=0.7, s=8)
-    axes[0].set_title("Raw Fingerprints (t-SNE)")
-    axes[0].set_xticks([]); axes[0].set_yticks([])
-    sc1 = axes[1].scatter(tsne_embed[:, 0], tsne_embed[:, 1], c=y_all, cmap="coolwarm", alpha=0.7, s=8)
-    axes[1].set_title("Learned Embeddings (t-SNE)")
-    axes[1].set_xticks([]); axes[1].set_yticks([])
-    plt.colorbar(sc1, ax=axes, orientation="horizontal", fraction=0.05, pad=0.1, label="Class label")
-    plt.tight_layout()
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{save_prefix}_{timestamp}.png"
-    plt.savefig(filename, dpi=300)
-    print0(f"[t-SNE] Saved plot to {os.path.abspath(filename)}")
-    plt.show()
-
-
-# -------------------- Hyperparameters --------------------
-MODEL_TYPE = "resnet"  # "mlp" | "cnn" | "resnet"
-
-TRAIN_NPZ = '../data/train/baseline_train_ecfp4.npz'
-VAL_NPZ   = '../data/val/baseline_val_ecfp4.npz'
-NORMALIZE = False
-BATCH_SIZE = 64
-EPOCHS = 1000
-LR = 3e-4
-WEIGHT_DECAY = 1e-4
-TEMPERATURE = 0.05
-EMBED_DIM = 512
-PROJ_DIM = 256
-SEED = 42
-SUBSET_SIZE = 1000
-
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 
-# -------------------- Dataset --------------------
+# ---- Dataset ----
+
 class NPZFingerprints(Dataset):
     def __init__(self, npz_path: str, normalize: bool = False, mean=None, std=None):
         z = np.load(npz_path, allow_pickle=False)
@@ -132,7 +96,8 @@ class NPZFingerprints(Dataset):
                 self.mean = arr.mean(axis=0)
                 self.std = arr.std(axis=0) + 1e-8
         else:
-            self.mean = None; self.std = None
+            self.mean = None
+            self.std = None
 
     def __len__(self):
         return self.N
@@ -145,28 +110,30 @@ class NPZFingerprints(Dataset):
         return torch.from_numpy(x), torch.tensor(y, dtype=torch.long)
 
 
-# -------------------- Models --------------------
-def evaluate_linear_probe(model, dataloader, device, max_samples=5000):
-    # Run only on rank 0 for simplicity
-    if get_rank() != 0:
-        return None
-    model.eval()
-    xs, ys = [], []
-    with torch.no_grad():
-        for xb, yb in dataloader:
-            xb, yb = xb.to(device), yb.to(device)
-            g, z = model(xb)
-            xs.append(g.cpu().numpy())
-            ys.append(yb.cpu().numpy())
-            if len(xs) * xb.size(0) >= max_samples:
-                break
-    X = np.concatenate(xs, axis=0)
-    y = np.concatenate(ys, axis=0)
-    clf = LogisticRegression(max_iter=1000, class_weight="balanced")
-    clf.fit(X, y)
-    y_pred = clf.predict_proba(X)[:, 1]
-    auprc = average_precision_score(y, y_pred)
-    return auprc
+# ---- Models ----
+
+def build_model(model_type="mlp", fp_dim=2048, embed_dim=128, proj_dim=64,
+                hidden_channels=(128, 256), use_projection=True, batchnorm_safe=True,
+                dropout_p=0.2):
+    
+    if model_type.lower() == "mlp":
+        return TinyMLP(fp_dim=fp_dim, embed_dim=embed_dim, proj_dim=proj_dim)
+        
+    elif model_type.lower() == "cnn":
+        return fp_CNN_Encoder(fp_dim=fp_dim, hidden_channels=(64, 128),
+                              embed_dim=embed_dim, proj_dim=proj_dim,
+                              use_projection=use_projection,
+                              batchnorm_safe=batchnorm_safe)
+        
+    elif model_type.lower() == "resnet":
+        return fp_CNN_ResNetEncoder(fp_dim=fp_dim, hidden_channels=hidden_channels,
+                                    embed_dim=embed_dim, proj_dim=proj_dim,
+                                    use_projection=use_projection,
+                                    batchnorm_safe=batchnorm_safe,
+                                    dropout_p=dropout_p)
+    else:
+        raise ValueError(f"Unknown model_type={model_type}")
+
 
 
 class fp_CNN_Encoder(nn.Module):
@@ -312,34 +279,17 @@ class SupConLoss(nn.Module):
         return -pos_log_prob.mean()
 
 
-def build_model(model_type="mlp", fp_dim=2048, embed_dim=128, proj_dim=64,
-                hidden_channels=(128, 256), use_projection=True, batchnorm_safe=True,
-                dropout_p=0.2):
-    if model_type.lower() == "mlp":
-        return TinyMLP(fp_dim=fp_dim, embed_dim=embed_dim, proj_dim=proj_dim)
-    elif model_type.lower() == "cnn":
-        return fp_CNN_Encoder(fp_dim=fp_dim, hidden_channels=(64, 128),
-                              embed_dim=embed_dim, proj_dim=proj_dim,
-                              use_projection=use_projection,
-                              batchnorm_safe=batchnorm_safe)
-    elif model_type.lower() == "resnet":
-        return fp_CNN_ResNetEncoder(fp_dim=fp_dim, hidden_channels=hidden_channels,
-                                    embed_dim=embed_dim, proj_dim=proj_dim,
-                                    use_projection=use_projection,
-                                    batchnorm_safe=batchnorm_safe,
-                                    dropout_p=dropout_p)
-    else:
-        raise ValueError(f"Unknown model_type={model_type}")
+# ---- Main ----
 
-
-# -------------------- Main --------------------
 def main():
     device = setup_distributed()
     rank = get_rank()
     world = get_world_size()
     print0(f"DDP initialized: rank={rank}, world={world}, device={device}")
+    print0(f"Using {world} GPU{'s' if world != 1 else ''} for training")
 
-    # Dataset and balanced subset selection on rank 0, then broadcast
+    torch.set_num_threads(1)
+
     base_train = NPZFingerprints(TRAIN_NPZ, normalize=False)
     labels_all = base_train.labels.astype(np.int64)
 
@@ -359,94 +309,123 @@ def main():
         sel_len = np.zeros((1,), dtype=np.int64)
 
     if is_dist():
-        # Broadcast length then indices; NCCL requires tensors to live on CUDA devices
         sel_len_t = torch.from_numpy(sel_len)
-        if device.type == "cuda":
+        if device.type == 'cuda':
             sel_len_t = sel_len_t.to(device)
         dist.broadcast(sel_len_t, src=0)
         sel_len = sel_len_t.cpu().numpy()
         if rank != 0:
             sel_idx_np = np.empty((sel_len[0],), dtype=np.int64)
         sel_idx_t = torch.from_numpy(sel_idx_np)
-        if device.type == "cuda":
+        if device.type == 'cuda':
             sel_idx_t = sel_idx_t.to(device)
         dist.broadcast(sel_idx_t, src=0)
         sel_idx_np = sel_idx_t.cpu().numpy()
 
     train_ds = Subset(base_train, sel_idx_np.tolist())
 
-    # Distributed sampler over the subset (balanced overall due to selection above)
-    sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank, shuffle=True, drop_last=False) if world > 1 else None
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=BATCH_SIZE,
-        sampler=sampler,
-        shuffle=(sampler is None),
-        num_workers=0,
-        pin_memory=torch.cuda.is_available(),
-    )
-
     print0("Subset stats:",
            "pos =", int((labels_all[sel_idx_np] == 1).sum()),
            "neg =", int((labels_all[sel_idx_np] == 0).sum()),
            "total =", len(sel_idx_np))
 
-    # Model, loss, optimizer
-    torch.set_num_threads(1)
+    sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank,
+                                 shuffle=True, drop_last=False)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=BATCH_SIZE,
+        sampler=sampler,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+
     model = build_model(model_type=MODEL_TYPE, fp_dim=2048,
                         embed_dim=EMBED_DIM, proj_dim=PROJ_DIM).to(device)
 
-    if world > 1 and torch.cuda.is_available():
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[device.index], output_device=device.index)
-    elif world > 1:
-        model = nn.parallel.DistributedDataParallel(model)
+    if world > 1:
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[device.index] if device.type == 'cuda' else None)
 
     criterion = SupConLoss(temperature=TEMPERATURE).to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum=0.9,
                                 weight_decay=WEIGHT_DECAY, nesterov=True)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    scaler = amp.GradScaler(device.type)
 
     print0("Train size:", len(train_ds))
 
     for epoch in range(1, EPOCHS + 1):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
+        sampler.set_epoch(epoch)
         model.train()
-        epoch_loss, steps = 0.0, 0
+        epoch_loss = 0.0
+        steps = 0
+
         for xb, yb in train_loader:
-            xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            if yb.unique().numel() < 2:
-                continue
-            g, z = model(xb)
-            loss = criterion(z, yb)
+
+            with amp.autocast(device.type, dtype=torch.float16 if device.type == 'cuda' else torch.bfloat16):
+                outputs = model(xb)
+                if isinstance(outputs, tuple):
+                    _, z = outputs
+                else:
+                    z = outputs
+                if yb.unique().numel() < 2:
+                    # Keep ranks in sync by contributing a zero loss when the batch lacks positives.
+                    loss = criterion(z.clone(), yb.clone()) * 0.0
+                else:
+                    loss = criterion(z, yb)
+
             if not torch.isfinite(loss):
                 continue
-            loss.backward()
-            optimizer.step()
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
             epoch_loss += loss.item()
             steps += 1
 
         scheduler.step()
 
-        if get_rank() == 0:
-            if steps == 0:
-                print("[Epoch %03d] all batches skipped" % epoch)
-            else:
-                train_loss = epoch_loss / steps
-                # Small eval on rank 0
-                eval_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-                auprc = evaluate_linear_probe(model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model,
-                                              eval_loader, device)
-                print(f"[Epoch {epoch:03d}] train_supcon={train_loss:.4f}, train_auprc={auprc:.4f}")
+        loss_steps = torch.tensor([epoch_loss, steps], dtype=torch.float32, device=device)
+        if is_dist():
+            dist.all_reduce(loss_steps, op=dist.ReduceOp.SUM)
 
-    # Final t-SNE on rank 0
-    visualize_tsne(model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model, train_ds, device)
+        total_steps = int(loss_steps[1].item())
+        if total_steps == 0:
+            print0(f"[Epoch {epoch:03d}] all batches skipped")
+        else:
+            mean_loss = loss_steps[0].item() / total_steps
+            print0(f"[Epoch {epoch:03d}] train_supcon={mean_loss:.4f}")
+
+    if get_rank() == 0:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_to_save = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+        checkpoint = {
+            "model_state_dict": model_to_save.state_dict(),
+            "model_type": MODEL_TYPE,
+            "timestamp": timestamp,
+            "hyperparameters": {
+                "temperature": TEMPERATURE,
+                "embed_dim": EMBED_DIM,
+                "proj_dim": PROJ_DIM,
+                "batch_size": BATCH_SIZE,
+                "epochs": EPOCHS,
+                "learning_rate": LR,
+                "weight_decay": WEIGHT_DECAY,
+                "subset_size": SUBSET_SIZE,
+            },
+        }
+        model_filename = f"supcon_ddp_{MODEL_TYPE.lower()}_{timestamp}.pt"
+        model_path =f"../models/{model_filename}"
+        torch.save(checkpoint, model_path)
+        print0(f"[Checkpoint] Saved model to {model_path}")
 
     barrier()
     if is_dist():
         dist.destroy_process_group()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

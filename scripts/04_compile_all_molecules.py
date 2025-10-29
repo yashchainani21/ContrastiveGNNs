@@ -10,11 +10,11 @@ max_extension_modules = 3
 num_bio_steps = 1
 num_chem_steps = 1
 
-PKS_products_filepath = f'../data/interim/unbound_PKS_products_{max_extension_modules}_ext_mods_no_stereo.pkl'
+PKS_products_filepath = f'../data/interim/expanded_unbound_PKS_products_{max_extension_modules}_ext_mods_no_stereo.pkl'
 DORAnet_bio_products_filepath = f'../data/interim/DORAnet_BIO{num_bio_steps}_from_PKS_products_{max_extension_modules}_ext_mods_no_stereo.txt'
 DORAnet_chem_products_filepath = f'../data/interim/DORAnet_CHEM{num_chem_steps}_from_PKS_products_{max_extension_modules}_ext_mods_no_stereo.txt'
 
-all_molecules_output_filepath = f'../data/processed/all_PKS_and_non_PKS_molecules_{max_extension_modules}_BIO{num_bio_steps}_CHEM{num_chem_steps}_no_stereo.parquet'
+all_molecules_output_filepath = f'../data/processed/expanded_all_PKS_and_non_PKS_molecules_{max_extension_modules}_BIO{num_bio_steps}_CHEM{num_chem_steps}_no_stereo.parquet'
 
 def sanitize_smiles_no_stereo(smi: str) -> Optional[str]:
     """Return a sanitized, canonical SMILES without stereochemistry, or None if invalid."""
