@@ -14,7 +14,7 @@ import bcs
 max_extension_modules = 3
 
 # set output filepath for saving generated (cluster, product) pairs
-output_filepath = f"../data/raw/expanded_bound_PKS_products_{max_extension_modules}_ext_mods.pkl"
+output_filepath = f"../data/raw/expanded_bound_PKS_products_{max_extension_modules}_ext_mods_mal_mmal_allylmal_hmal_v3.pkl"
 
 def modify_bcs_starters_extenders(starter_codes: Optional[List[str]] = None,
                                   extender_codes: Optional[List[str]] = None):
@@ -46,7 +46,7 @@ def modify_bcs_starters_extenders(starter_codes: Optional[List[str]] = None,
 starter_codes = None 
 
 # for extenders, only allow Malonyl-CoA, Methylmalonyl-CoA, Ethylmalonyl-CoA, 
-extender_codes = ['Malonyl-CoA', 'Methylmalonyl-CoA', 'emal']
+extender_codes = ['Malonyl-CoA', 'Methylmalonyl-CoA', 'allylmal', 'hmal']#, 'emal', 'mxmal']
 
 modify_bcs_starters_extenders(starter_codes = starter_codes, extender_codes = extender_codes)
 print((f"\nNumber of starter units: {len(bcs.starters)}"))
@@ -88,16 +88,16 @@ if __name__ == "__main__":
         for i in range(1, max_extension_modules + 1):
             print(f"\nGenerating clusters and products with {i} extension module(s)...\n")
 
-        # create all possible (starter, extension_combo) pairs
-        starter_plus_ext_mods_combos = product(bcs.starters.keys(), product(extension_modules_list, repeat = i))
+            # create all possible (starter, extension_combo) pairs
+            starter_plus_ext_mods_combos = product(bcs.starters.keys(), product(extension_modules_list, repeat = i))
 
-        # build clusters and products in parallel
-        results_i = pool.starmap(build_bcs_cluster_and_product, starter_plus_ext_mods_combos)
+            # build clusters and products in parallel
+            results_i = pool.starmap(build_bcs_cluster_and_product, starter_plus_ext_mods_combos)
 
-        # filter out failed builds
-        results_i = [r for r in results_i if None not in r]
+            # filter out failed builds
+            results_i = [r for r in results_i if None not in r]
 
-        all_cluster_product_pairs.extend(results_i)
+            all_cluster_product_pairs.extend(results_i)
 
     print(f"Successfully generated {len(all_cluster_product_pairs)} (cluster, product) pairs.\n")
 
