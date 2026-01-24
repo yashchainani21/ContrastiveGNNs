@@ -138,6 +138,37 @@ def _pks_counts(path: Path):
     return pks, nonpks, total, ratio
 
 
+def test_pks_pkl_has_no_duplicate_values():
+    """
+    Ensure PKS pkl files don't lose data due to key collisions.
+
+    This catches the bug where using pks_design as dict key caused
+    thiolysis products to be overwritten by cyclization products.
+    """
+    import pickle
+
+    project_root = Path(__file__).resolve().parents[1]
+    processed_dir = project_root / "data" / "processed"
+    pkl_files = list(processed_dir.glob("pks_products_*.pkl"))
+
+    if not pkl_files:
+        pytest.skip("No PKS pkl files found")
+
+    for pkl_path in pkl_files:
+        if "_SMILES" in pkl_path.name:
+            continue  # Skip txt files
+
+        with open(pkl_path, 'rb') as f:
+            data = pickle.load(f)
+
+        if isinstance(data, dict):
+            values = list(data.values())
+            assert len(values) == len(set(values)), (
+                f"{pkl_path.name}: has {len(values)} values but only "
+                f"{len(set(values))} unique - indicates data loss"
+            )
+
+
 def test_pks_ratio_similarity_across_splits():
     """
     Check that the PKS fraction is similar across train/val/test.
