@@ -204,3 +204,172 @@ def test_pks_ratio_similarity_across_splits():
             errors.append(f"PKS ratio differs more than {tol:.2f} between {a} ({ratios[a]:.3f}) and {b} ({ratios[b]:.3f})")
 
     assert not errors, "\n".join(errors)
+
+
+# ============================================================================
+# SupCon Split Tests
+# ============================================================================
+
+def _find_supcon_split_path(base: Path, split: str) -> Optional[Path]:
+    """Find SupCon split file for a given split."""
+    p = base / split / f"supcon_{split}.parquet"
+    if p.exists():
+        return p
+    return None
+
+
+def _load_supcon_df(path: Path) -> pd.DataFrame:
+    """Load a SupCon split parquet file."""
+    return pd.read_parquet(path)
+
+
+def test_supcon_no_smiles_leakage():
+    """Verify no SMILES overlap across SupCon train/val/test splits."""
+    project_root = Path(__file__).resolve().parents[1]
+    data_dir = project_root / "data"
+
+    train_path = _find_supcon_split_path(data_dir, "train")
+    val_path = _find_supcon_split_path(data_dir, "val")
+    test_path = _find_supcon_split_path(data_dir, "test")
+
+    pairs = [("train", train_path), ("val", val_path), ("test", test_path)]
+    missing = [name for (name, p) in pairs if p is None]
+    if missing:
+        pytest.skip(f"Missing SupCon split files for: {', '.join(missing)}")
+
+    train_smiles = set(_load_supcon_df(train_path)['smiles'])
+    val_smiles = set(_load_supcon_df(val_path)['smiles'])
+    test_smiles = set(_load_supcon_df(test_path)['smiles'])
+
+    inter_train_val = train_smiles & val_smiles
+    inter_train_test = train_smiles & test_smiles
+    inter_val_test = val_smiles & test_smiles
+
+    assert not inter_train_val, (
+        f"SMILES leakage between train and val: {len(inter_train_val)} molecules. "
+        f"Examples: {list(sorted(inter_train_val))[:5]}"
+    )
+    assert not inter_train_test, (
+        f"SMILES leakage between train and test: {len(inter_train_test)} molecules. "
+        f"Examples: {list(sorted(inter_train_test))[:5]}"
+    )
+    assert not inter_val_test, (
+        f"SMILES leakage between val and test: {len(inter_val_test)} molecules. "
+        f"Examples: {list(sorted(inter_val_test))[:5]}"
+    )
+
+
+def test_supcon_class_ratios():
+    """Verify ~33% PKS ratio in each SupCon split (inherent to triplet structure)."""
+    project_root = Path(__file__).resolve().parents[1]
+    data_dir = project_root / "data"
+
+    paths = {
+        split: _find_supcon_split_path(data_dir, split)
+        for split in ("train", "val", "test")
+    }
+    missing = [s for s, p in paths.items() if p is None]
+    if missing:
+        pytest.skip(f"Missing SupCon split files for: {', '.join(missing)}")
+
+    # Expected ratio is 1/3 (one PKS per triplet, two augmentations)
+    expected_ratio = 1 / 3
+    tol = 0.02  # 2 percentage points tolerance
+
+    errors = []
+    for split, path in paths.items():
+        df = _load_supcon_df(path)
+        pks_ratio = (df['label'] == 1).mean()
+        print(f"SupCon {split}: PKS ratio = {pks_ratio:.3f} (expected ~{expected_ratio:.3f})")
+
+        if abs(pks_ratio - expected_ratio) > tol:
+            errors.append(
+                f"SupCon {split} PKS ratio {pks_ratio:.3f} differs from expected "
+                f"{expected_ratio:.3f} by more than {tol:.2f}"
+            )
+
+    assert not errors, "\n".join(errors)
+
+
+def test_supcon_split_sizes():
+    """Verify ~80/10/10 split ratios for SupCon data."""
+    project_root = Path(__file__).resolve().parents[1]
+    data_dir = project_root / "data"
+
+    paths = {
+        split: _find_supcon_split_path(data_dir, split)
+        for split in ("train", "val", "test")
+    }
+    missing = [s for s, p in paths.items() if p is None]
+    if missing:
+        pytest.skip(f"Missing SupCon split files for: {', '.join(missing)}")
+
+    sizes = {split: len(_load_supcon_df(path)) for split, path in paths.items()}
+    total = sum(sizes.values())
+
+    ratios = {split: size / total for split, size in sizes.items()}
+    expected = {'train': 0.8, 'val': 0.1, 'test': 0.1}
+    tol = 0.02  # 2 percentage points tolerance
+
+    print(f"SupCon split sizes: {sizes}")
+    print(f"SupCon split ratios: train={ratios['train']:.3f}, val={ratios['val']:.3f}, test={ratios['test']:.3f}")
+
+    errors = []
+    for split in ['train', 'val', 'test']:
+        if abs(ratios[split] - expected[split]) > tol:
+            errors.append(
+                f"SupCon {split} ratio {ratios[split]:.3f} differs from expected "
+                f"{expected[split]:.2f} by more than {tol:.2f}"
+            )
+
+    assert not errors, "\n".join(errors)
+
+
+def test_supcon_triplet_integrity():
+    """Verify each triplet_id has exactly 3 rows (1 PKS + 2 augmentations)."""
+    project_root = Path(__file__).resolve().parents[1]
+    data_dir = project_root / "data"
+
+    paths = {
+        split: _find_supcon_split_path(data_dir, split)
+        for split in ("train", "val", "test")
+    }
+    missing = [s for s, p in paths.items() if p is None]
+    if missing:
+        pytest.skip(f"Missing SupCon split files for: {', '.join(missing)}")
+
+    errors = []
+    for split, path in paths.items():
+        df = _load_supcon_df(path)
+
+        # Check each triplet has exactly 3 rows
+        triplet_counts = df.groupby('triplet_id').size()
+        invalid_triplets = triplet_counts[triplet_counts != 3]
+        if len(invalid_triplets) > 0:
+            errors.append(
+                f"SupCon {split}: {len(invalid_triplets)} triplets don't have exactly 3 rows. "
+                f"Examples: {invalid_triplets.head(5).to_dict()}"
+            )
+
+        # Check each triplet has exactly 1 PKS (label=1) and 2 augmentations (label=0)
+        triplet_pks_counts = df.groupby('triplet_id')['label'].sum()
+        invalid_pks = triplet_pks_counts[triplet_pks_counts != 1]
+        if len(invalid_pks) > 0:
+            errors.append(
+                f"SupCon {split}: {len(invalid_pks)} triplets don't have exactly 1 PKS molecule. "
+                f"Examples: {invalid_pks.head(5).to_dict()}"
+            )
+
+        # Check source distribution per triplet
+        for triplet_id in df['triplet_id'].unique()[:100]:  # Sample first 100 triplets
+            triplet_df = df[df['triplet_id'] == triplet_id]
+            sources = set(triplet_df['source'])
+            expected_sources = {'pks', 'enzymatic_aug', 'synthetic_aug'}
+            if sources != expected_sources:
+                errors.append(
+                    f"SupCon {split}: triplet {triplet_id} has sources {sources}, "
+                    f"expected {expected_sources}"
+                )
+                break  # Only report first error
+
+    assert not errors, "\n".join(errors)

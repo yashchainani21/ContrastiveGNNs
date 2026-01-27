@@ -13,3 +13,9 @@ __pycache__/
 # macOS
 .DS_Store
 
+# DORAnet network files (generated during chemoenzymatic modifications)
+*.pgnet
+
+# Claude Code instructions (local development)
+CLAUDE.md
+
