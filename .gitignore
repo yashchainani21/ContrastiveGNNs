@@ -1,21 +1,2 @@
-# Python caches
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Pytest cache
-.pytest_cache/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# macOS
-.DS_Store
-
-# DORAnet network files (generated during chemoenzymatic modifications)
-*.pgnet
-
-# Claude Code instructions (local development)
-CLAUDE.md
-
+# Shell scripts
+*.sh
