@@ -1,8 +1,1 @@
-data/**/*.parquet filter=lfs diff=lfs merge=lfs -text
-data/**/*.pkl filter=lfs diff=lfs merge=lfs -text
-data/interim/*.txt filter=lfs diff=lfs merge=lfs -text
-data/train/baseline_train_ecfp4.npz filter=lfs diff=lfs merge=lfs -text
-*.parquet !text !filter !merge !diff
-*.pkl !text !filter !merge !diff
-*.txt !text !filter !merge !diff
-*.npz !text !filter !merge !diff
+*.parquet filter=lfs diff=lfs merge=lfs -text

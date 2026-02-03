@@ -212,6 +212,10 @@ def test_pks_ratio_similarity_across_splits():
 
 def _find_supcon_split_path(base: Path, split: str) -> Optional[Path]:
     """Find SupCon split file for a given split."""
+    # Prefer _V1 files first
+    p_v1 = base / split / f"supcon_{split}_V1.parquet"
+    if p_v1.exists():
+        return p_v1
     p = base / split / f"supcon_{split}.parquet"
     if p.exists():
         return p

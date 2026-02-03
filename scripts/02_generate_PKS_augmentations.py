@@ -71,6 +71,11 @@ DEFAULT_SKIPPED = '../data/processed/pks_augmentation_skipped.json'
 FP_RADIUS = 2
 FP_NBITS = 2048
 
+# Batch processing parameters
+# Set BATCH_SIZE to limit molecules processed per run (for resumable batch processing)
+# Set to None to process all remaining molecules
+BATCH_SIZE: Optional[int] = 1000
+
 # Helper SMILES to exclude from synthetic products
 HELPER_SMILES_SET = frozenset((
     "O", "O=O", "[H][H]", "O=C=O", "C=O", "[C-]#[O+]", "Br", "[Br][Br]",
@@ -262,6 +267,26 @@ def chunkify(lst: list, n: int) -> List[list]:
     return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
 
 
+def load_already_processed(output_path: Path, skipped_path: Path) -> Set[str]:
+    """Load PKS SMILES that have already been processed from previous runs."""
+    processed = set()
+
+    # Load successful results
+    if output_path.exists():
+        df = pd.read_parquet(output_path)
+        if 'pks_smiles' in df.columns:
+            processed.update(df['pks_smiles'].tolist())
+
+    # Load skipped molecules
+    if skipped_path.exists():
+        with open(skipped_path, 'r') as f:
+            skipped_data = json.load(f)
+        for item in skipped_data:
+            processed.add(item['pks_smiles'])
+
+    return processed
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate PKS augmentation pairs for SupCon training')
     parser.add_argument('--input', type=str, default=DEFAULT_INPUT,
@@ -283,19 +308,40 @@ if __name__ == '__main__':
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    # Only rank 0 reads the input file
+    # Only rank 0 reads the input file and handles resume logic
     if rank == 0:
         input_path = Path(args.input)
+        output_path = Path(args.output)
+        skipped_path = Path(args.skipped)
+
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
 
         with open(input_path, 'r') as f:
             pks_list = [line.strip() for line in f if line.strip()]
 
-        print(f"Loaded {len(pks_list)} PKS molecules from {input_path}", flush=True)
+        total_in_file = len(pks_list)
+        print(f"Loaded {total_in_file} PKS molecules from {input_path}", flush=True)
 
-        # Prepare chunks for distribution
-        chunks = chunkify(pks_list, size)
+        # Load already-processed molecules and filter them out
+        already_processed = load_already_processed(output_path, skipped_path)
+        if already_processed:
+            pks_list = [s for s in pks_list if s not in already_processed]
+            print(f"Skipping {len(already_processed)} already-processed molecules, "
+                  f"{len(pks_list)} remaining", flush=True)
+
+        # Apply BATCH_SIZE limit
+        if BATCH_SIZE is not None and len(pks_list) > BATCH_SIZE:
+            pks_list = pks_list[:BATCH_SIZE]
+            print(f"Limiting to BATCH_SIZE={BATCH_SIZE} molecules this run", flush=True)
+
+        if len(pks_list) == 0:
+            print("All molecules already processed! Nothing to do.", flush=True)
+            chunks = [[] for _ in range(size)]
+        else:
+            print(f"Processing {len(pks_list)} molecules this run", flush=True)
+            # Prepare chunks for distribution
+            chunks = chunkify(pks_list, size)
         # Pad with empty chunks if needed
         while len(chunks) < size:
             chunks.append([])
@@ -333,9 +379,12 @@ if __name__ == '__main__':
         successful = [r for r in flat_results if r['success']]
         skipped = [r for r in flat_results if not r['success']]
 
-        # Build output dataframe
+        # Build output dataframe for this batch
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
         if successful:
-            df_out = pd.DataFrame({
+            df_new = pd.DataFrame({
                 'pks_smiles': [r['pks_smiles'] for r in successful],
                 'enzymatic_aug_smiles': [r['enzymatic_aug_smiles'] for r in successful],
                 'synthetic_aug_smiles': [r['synthetic_aug_smiles'] for r in successful],
@@ -343,16 +392,42 @@ if __name__ == '__main__':
                 'synthetic_similarity': [r['synthetic_similarity'] for r in successful],
             })
 
-            # Write parquet
-            output_path = Path(args.output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            df_out.to_parquet(output_path, index=False)
-            print(f"Wrote {len(df_out)} triplets to {output_path}", flush=True)
-        else:
-            print("WARNING: No successful triplets generated!", flush=True)
-            df_out = pd.DataFrame()
+            # Append to existing parquet or create new
+            if output_path.exists():
+                df_existing = pd.read_parquet(output_path)
+                df_out = pd.concat([df_existing, df_new], ignore_index=True)
+                print(f"Appended {len(df_new)} new triplets to existing {len(df_existing)} "
+                      f"(total: {len(df_out)})", flush=True)
+            else:
+                df_out = df_new
+                print(f"Created new output with {len(df_out)} triplets", flush=True)
 
-        # Compute statistics
+            df_out.to_parquet(output_path, index=False)
+            print(f"Wrote {len(df_out)} total triplets to {output_path}", flush=True)
+        else:
+            print("WARNING: No successful triplets generated this batch!", flush=True)
+            # Load existing if available for stats
+            if output_path.exists():
+                df_out = pd.read_parquet(output_path)
+            else:
+                df_out = pd.DataFrame()
+
+        # Append to skipped molecules file
+        skipped_path = Path(args.skipped)
+        new_skipped_data = [{'pks_smiles': r['pks_smiles'], 'reason': r['skip_reason']} for r in skipped]
+
+        if skipped_path.exists():
+            with open(skipped_path, 'r') as f:
+                existing_skipped = json.load(f)
+            all_skipped_data = existing_skipped + new_skipped_data
+        else:
+            all_skipped_data = new_skipped_data
+
+        with open(skipped_path, 'w') as f:
+            json.dump(all_skipped_data, f, indent=2)
+        print(f"Total skipped molecules: {len(all_skipped_data)} (+{len(new_skipped_data)} this batch)", flush=True)
+
+        # Compute statistics for THIS BATCH (for logging)
         skip_reasons = {}
         for r in skipped:
             reason = r['skip_reason']
@@ -372,26 +447,39 @@ if __name__ == '__main__':
             else:
                 rank_dist['rank_3_plus'] += 1
 
+        # Stats reflect cumulative totals
         stats = {
-            'total_pks_input': len(flat_results),
-            'successful_triplets': len(successful),
-            'skipped_no_enzymatic': skip_reasons.get('no_enzymatic', 0),
-            'skipped_no_synthetic': skip_reasons.get('no_synthetic', 0),
-            'skipped_all_synthetic_match_enzymatic': skip_reasons.get('all_synthetic_match_enzymatic', 0),
-            'skipped_rdkit_error': skip_reasons.get('rdkit_error', 0),
-            'enzymatic_similarity': {
-                'mean': float(np.mean(enz_sims)) if enz_sims else None,
-                'median': float(np.median(enz_sims)) if enz_sims else None,
-                'min': float(np.min(enz_sims)) if enz_sims else None,
-                'max': float(np.max(enz_sims)) if enz_sims else None,
+            'batch_size_setting': BATCH_SIZE,
+            'this_batch': {
+                'processed': len(flat_results),
+                'successful': len(successful),
+                'skipped': len(skipped),
             },
-            'synthetic_similarity': {
-                'mean': float(np.mean(syn_sims)) if syn_sims else None,
-                'median': float(np.median(syn_sims)) if syn_sims else None,
-                'min': float(np.min(syn_sims)) if syn_sims else None,
-                'max': float(np.max(syn_sims)) if syn_sims else None,
+            'cumulative': {
+                'total_successful': len(df_out) if not df_out.empty else 0,
+                'total_skipped': len(all_skipped_data),
             },
-            'synthetic_rank_distribution': rank_dist
+            'this_batch_skip_reasons': {
+                'no_enzymatic': skip_reasons.get('no_enzymatic', 0),
+                'no_synthetic': skip_reasons.get('no_synthetic', 0),
+                'all_synthetic_match_enzymatic': skip_reasons.get('all_synthetic_match_enzymatic', 0),
+                'rdkit_error': skip_reasons.get('rdkit_error', 0),
+            },
+            'this_batch_similarity': {
+                'enzymatic': {
+                    'mean': float(np.mean(enz_sims)) if enz_sims else None,
+                    'median': float(np.median(enz_sims)) if enz_sims else None,
+                    'min': float(np.min(enz_sims)) if enz_sims else None,
+                    'max': float(np.max(enz_sims)) if enz_sims else None,
+                },
+                'synthetic': {
+                    'mean': float(np.mean(syn_sims)) if syn_sims else None,
+                    'median': float(np.median(syn_sims)) if syn_sims else None,
+                    'min': float(np.min(syn_sims)) if syn_sims else None,
+                    'max': float(np.max(syn_sims)) if syn_sims else None,
+                },
+            },
+            'this_batch_synthetic_rank_distribution': rank_dist
         }
 
         # Write stats
@@ -400,30 +488,26 @@ if __name__ == '__main__':
             json.dump(stats, f, indent=2)
         print(f"Wrote statistics to {stats_path}", flush=True)
 
-        # Write skipped molecules
-        skipped_data = [{'pks_smiles': r['pks_smiles'], 'reason': r['skip_reason']} for r in skipped]
-        skipped_path = Path(args.skipped)
-        with open(skipped_path, 'w') as f:
-            json.dump(skipped_data, f, indent=2)
-        print(f"Wrote {len(skipped_data)} skipped molecules to {skipped_path}", flush=True)
-
         # Print summary
         print("\n" + "="*60)
-        print("GENERATION SUMMARY")
+        print("BATCH SUMMARY")
         print("="*60)
-        print(f"Total PKS input:        {stats['total_pks_input']}")
-        print(f"Successful triplets:    {stats['successful_triplets']}")
-        print(f"Skipped (no enzymatic): {stats['skipped_no_enzymatic']}")
-        print(f"Skipped (no synthetic): {stats['skipped_no_synthetic']}")
-        print(f"Skipped (syn=enz):      {stats['skipped_all_synthetic_match_enzymatic']}")
-        print(f"Skipped (RDKit error):  {stats['skipped_rdkit_error']}")
+        print(f"BATCH_SIZE setting:     {BATCH_SIZE}")
+        print(f"This batch processed:   {stats['this_batch']['processed']}")
+        print(f"This batch successful:  {stats['this_batch']['successful']}")
+        print(f"This batch skipped:     {stats['this_batch']['skipped']}")
+        print(f"\nCUMULATIVE TOTALS:")
+        print(f"Total successful:       {stats['cumulative']['total_successful']}")
+        print(f"Total skipped:          {stats['cumulative']['total_skipped']}")
+        print(f"\nThis batch skip reasons:")
+        print(f"  No enzymatic:         {stats['this_batch_skip_reasons']['no_enzymatic']}")
+        print(f"  No synthetic:         {stats['this_batch_skip_reasons']['no_synthetic']}")
+        print(f"  Synthetic=enzymatic:  {stats['this_batch_skip_reasons']['all_synthetic_match_enzymatic']}")
+        print(f"  RDKit error:          {stats['this_batch_skip_reasons']['rdkit_error']}")
         if enz_sims:
-            print(f"\nEnzymatic similarity:   mean={stats['enzymatic_similarity']['mean']:.4f}, "
-                  f"median={stats['enzymatic_similarity']['median']:.4f}")
-            print(f"Synthetic similarity:   mean={stats['synthetic_similarity']['mean']:.4f}, "
-                  f"median={stats['synthetic_similarity']['median']:.4f}")
-            print(f"\nSynthetic rank distribution:")
-            print(f"  Rank 1 (most similar): {rank_dist['rank_1']}")
-            print(f"  Rank 2:                {rank_dist['rank_2']}")
-            print(f"  Rank 3+:               {rank_dist['rank_3_plus']}")
+            print(f"\nThis batch similarity:")
+            print(f"  Enzymatic: mean={stats['this_batch_similarity']['enzymatic']['mean']:.4f}, "
+                  f"median={stats['this_batch_similarity']['enzymatic']['median']:.4f}")
+            print(f"  Synthetic: mean={stats['this_batch_similarity']['synthetic']['mean']:.4f}, "
+                  f"median={stats['this_batch_similarity']['synthetic']['median']:.4f}")
         print("="*60)
