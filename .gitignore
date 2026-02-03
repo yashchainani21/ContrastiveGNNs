@@ -10,3 +10,4 @@ archives/
 # Python cache
 __pycache__/
 *.pyc
+CLAUDE.md
