@@ -84,6 +84,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every N epochs")
 
+    # Data subsetting
+    parser.add_argument(
+        "--max_train_samples", type=int, default=None,
+        help="Max number of training samples (default: use all)"
+    )
+
     # Misc
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
@@ -263,8 +269,10 @@ class GraphSample:
 class MolecularGraphDataset(Dataset):
     """Dataset that loads molecules from parquet and converts to graphs on-the-fly."""
 
-    def __init__(self, parquet_path: str):
+    def __init__(self, parquet_path: str, max_samples: Optional[int] = None):
         df = pd.read_parquet(parquet_path)
+        if max_samples is not None:
+            df = df.head(max_samples)
         self.smiles = df["smiles"].astype(str).tolist()
         self.labels = df["label"].to_numpy().astype(np.int64)
 
@@ -766,7 +774,7 @@ def main():
     val_path = data_dir / "val" / "supcon_val.parquet"
 
     log_rank0(f"Loading training data from {train_path}...", is_distributed)
-    train_ds = MolecularGraphDataset(str(train_path))
+    train_ds = MolecularGraphDataset(str(train_path), max_samples=args.max_train_samples)
     log_rank0(f"Loading validation data from {val_path}...", is_distributed)
     val_ds = MolecularGraphDataset(str(val_path))
 
