@@ -7,18 +7,9 @@ train/val/test sets, trains a logistic regression linear probe, and
 evaluates performance.
 
 Usage:
-    python scripts/08_train_linear_probe_on_GNN_embeddings.py \
-        --checkpoint models/supcon_gnn/best_model.pt
-
-    # With custom settings
-    python scripts/08_train_linear_probe_on_GNN_embeddings.py \
-        --checkpoint models/supcon_gnn/best_model.pt \
-        --batch_size 512 \
-        --num_workers 8 \
-        --save_embeddings
+    python scripts/08_train_linear_probe_on_GNN_embeddings.py
 """
 
-import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, average_precision_score, f1_score
+from sklearn.metrics import accuracy_score, average_precision_score, f1_score, roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -43,63 +34,22 @@ RDLogger.DisableLog("rdApp.*")
 
 
 # =============================================================================
-# Argument Parsing
+# Configuration
 # =============================================================================
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Train linear probe on GNN embeddings",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+CHECKPOINT = "models/supcon_gnn/best_model.pt"
+DATA_DIR = "data/"
+OUTPUT_DIR = "models/supcon_gnn/"
+BATCH_SIZE = 256
+NUM_WORKERS = 8
+MAX_ITER = 1000
+SAVE_EMBEDDINGS = True
+DATA_SUFFIX = ""
+SEED = 42
 
-    # Required
-    parser.add_argument(
-        "--checkpoint", type=str, required=True,
-        help="Path to GNN encoder checkpoint"
-    )
-
-    # Data paths
-    parser.add_argument(
-        "--data_dir", type=str, default="data/",
-        help="Path to data directory containing train/val/test subdirs"
-    )
-    parser.add_argument(
-        "--output_dir", type=str, default="models/supcon_gnn/",
-        help="Path for saving linear probe and metrics"
-    )
-
-    # Embedding extraction
-    parser.add_argument(
-        "--batch_size", type=int, default=256,
-        help="Batch size for embedding extraction"
-    )
-    parser.add_argument(
-        "--num_workers", type=int, default=8,
-        help="Number of DataLoader workers"
-    )
-
-    # Linear probe
-    parser.add_argument(
-        "--max_iter", type=int, default=1000,
-        help="LogisticRegression max iterations"
-    )
-
-    # Output options
-    parser.add_argument(
-        "--save_embeddings", action="store_true",
-        help="Save extracted embeddings as .npz files"
-    )
-
-    # Data file suffix (for testing with subsets)
-    parser.add_argument(
-        "--data_suffix", type=str, default="",
-        help="Suffix for data files (e.g., '_tiny' for supcon_train_tiny.parquet)"
-    )
-
-    # Misc
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-
-    return parser.parse_args()
+# ECFP4 linear probe
+TRAIN_ECFP4 = True
+ECFP4_SUFFIX = "_ecfp4"
 
 
 # =============================================================================
@@ -544,8 +494,30 @@ def evaluate_probe(
     return {
         "accuracy": float(accuracy_score(labels, preds)),
         "auprc": float(average_precision_score(labels, probs)),
+        "auroc": float(roc_auc_score(labels, probs)),
         "f1": float(f1_score(labels, preds)),
     }
+
+
+# =============================================================================
+# ECFP4 Data Loading
+# =============================================================================
+
+def load_ecfp4_data(parquet_path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Load ECFP4 fingerprint parquet and return (features, labels).
+
+    Args:
+        parquet_path: Path to parquet with fp_0..fp_N columns and label column
+
+    Returns:
+        X: [N, n_bits] float32 fingerprint array
+        y: [N] int labels
+    """
+    df = pd.read_parquet(parquet_path)
+    fp_cols = [c for c in df.columns if c.startswith("fp_")]
+    X = df[fp_cols].values.astype(np.float32)
+    y = df["label"].values.astype(np.int64)
+    return X, y
 
 
 # =============================================================================
@@ -553,29 +525,26 @@ def evaluate_probe(
 # =============================================================================
 
 def main():
-    args = parse_args()
-
     # Set seeds
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # Paths
-    data_dir = Path(args.data_dir)
-    output_dir = Path(args.output_dir)
+    data_dir = Path(DATA_DIR)
+    output_dir = Path(OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    suffix = args.data_suffix
-    train_path = data_dir / "train" / f"supcon_train{suffix}.parquet"
-    val_path = data_dir / "val" / f"supcon_val{suffix}.parquet"
-    test_path = data_dir / "test" / f"supcon_test{suffix}.parquet"
+    train_path = data_dir / "train" / f"supcon_train{DATA_SUFFIX}.parquet"
+    val_path = data_dir / "val" / f"supcon_val{DATA_SUFFIX}.parquet"
+    test_path = data_dir / "test" / f"supcon_test{DATA_SUFFIX}.parquet"
 
     # Load checkpoint and infer model architecture
-    print(f"\nLoading checkpoint from {args.checkpoint}...")
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    print(f"\nLoading checkpoint from {CHECKPOINT}...")
+    checkpoint = torch.load(CHECKPOINT, map_location=device, weights_only=False)
     model_state = checkpoint["model_state_dict"]
 
     # Infer architecture from checkpoint weights
@@ -620,29 +589,29 @@ def main():
     print(f"  Model loaded successfully")
 
     # Extract embeddings
-    print(f"\nExtracting embeddings (batch_size={args.batch_size}, workers={args.num_workers})...")
+    print(f"\nExtracting embeddings (batch_size={BATCH_SIZE}, workers={NUM_WORKERS})...")
 
     print(f"\nProcessing training set...")
     train_embeds, train_labels = extract_embeddings(
-        model, str(train_path), device, args.batch_size, args.num_workers
+        model, str(train_path), device, BATCH_SIZE, NUM_WORKERS
     )
     print(f"  Shape: {train_embeds.shape}, PKS ratio: {train_labels.mean():.3f}")
 
     print(f"\nProcessing validation set...")
     val_embeds, val_labels = extract_embeddings(
-        model, str(val_path), device, args.batch_size, args.num_workers
+        model, str(val_path), device, BATCH_SIZE, NUM_WORKERS
     )
     print(f"  Shape: {val_embeds.shape}, PKS ratio: {val_labels.mean():.3f}")
 
     print(f"\nProcessing test set...")
     test_embeds, test_labels = extract_embeddings(
-        model, str(test_path), device, args.batch_size, args.num_workers
+        model, str(test_path), device, BATCH_SIZE, NUM_WORKERS
     )
     print(f"  Shape: {test_embeds.shape}, PKS ratio: {test_labels.mean():.3f}")
 
     # Train linear probe
-    print(f"\nTraining linear probe (max_iter={args.max_iter}, n_jobs=-1)...")
-    clf = train_linear_probe(train_embeds, train_labels, args.max_iter, args.seed)
+    print(f"\nTraining linear probe (max_iter={MAX_ITER}, n_jobs=-1)...")
+    clf = train_linear_probe(train_embeds, train_labels, MAX_ITER, SEED)
     print(f"  Converged in {clf.n_iter_[0]} iterations")
 
     # Evaluate
@@ -654,14 +623,14 @@ def main():
     }
 
     # Print results
-    print("\n" + "=" * 60)
-    print("Linear Probe Results")
-    print("=" * 60)
-    print(f"{'Split':<10} {'Accuracy':>12} {'AUPRC':>12} {'F1':>12}")
-    print("-" * 60)
+    print("\n" + "=" * 72)
+    print("GNN Linear Probe Results")
+    print("=" * 72)
+    print(f"{'Split':<10} {'Accuracy':>12} {'AUPRC':>12} {'AUROC':>12} {'F1':>12}")
+    print("-" * 72)
     for split, m in metrics.items():
-        print(f"{split:<10} {m['accuracy']:>12.4f} {m['auprc']:>12.4f} {m['f1']:>12.4f}")
-    print("=" * 60)
+        print(f"{split:<10} {m['accuracy']:>12.4f} {m['auprc']:>12.4f} {m['auroc']:>12.4f} {m['f1']:>12.4f}")
+    print("=" * 72)
 
     # Save outputs
     probe_path = output_dir / "linear_probe.joblib"
@@ -675,7 +644,7 @@ def main():
         json.dump(metrics, f, indent=2)
 
     # Optionally save embeddings
-    if args.save_embeddings:
+    if SAVE_EMBEDDINGS:
         for split, (embeds, labels) in [
             ("train", (train_embeds, train_labels)),
             ("val", (val_embeds, val_labels)),
@@ -684,6 +653,67 @@ def main():
             embed_path = output_dir / f"embeddings_{split}.npz"
             print(f"Saving {split} embeddings to {embed_path}...")
             np.savez(embed_path, embeddings=embeds, labels=labels)
+
+    # =========================================================================
+    # ECFP4 Linear Probe (optional)
+    # =========================================================================
+    if TRAIN_ECFP4:
+        print("\n" + "=" * 72)
+        print("ECFP4 Linear Probe Training")
+        print("=" * 72)
+
+        ecfp4_train_path = data_dir / "train" / f"supcon_train{ECFP4_SUFFIX}.parquet"
+        ecfp4_val_path = data_dir / "val" / f"supcon_val{ECFP4_SUFFIX}.parquet"
+        ecfp4_test_path = data_dir / "test" / f"supcon_test{ECFP4_SUFFIX}.parquet"
+
+        if not ecfp4_train_path.exists():
+            print(f"  WARNING: {ecfp4_train_path} not found. Skipping ECFP4 probe.")
+            print(f"  Run scripts/04_local_fingerprint_molecules.py first.")
+        else:
+            # Load ECFP4 data
+            print(f"\nLoading ECFP4 fingerprints...")
+            ecfp4_train_X, ecfp4_train_y = load_ecfp4_data(str(ecfp4_train_path))
+            print(f"  Train: {ecfp4_train_X.shape}, PKS ratio: {ecfp4_train_y.mean():.3f}")
+
+            ecfp4_val_X, ecfp4_val_y = load_ecfp4_data(str(ecfp4_val_path))
+            print(f"  Val:   {ecfp4_val_X.shape}, PKS ratio: {ecfp4_val_y.mean():.3f}")
+
+            ecfp4_test_X, ecfp4_test_y = load_ecfp4_data(str(ecfp4_test_path))
+            print(f"  Test:  {ecfp4_test_X.shape}, PKS ratio: {ecfp4_test_y.mean():.3f}")
+
+            # Train ECFP4 linear probe (same config as GNN probe for fair comparison)
+            print(f"\nTraining ECFP4 linear probe (max_iter={MAX_ITER}, n_jobs=-1)...")
+            ecfp4_clf = train_linear_probe(ecfp4_train_X, ecfp4_train_y, MAX_ITER, SEED)
+            print(f"  Converged in {ecfp4_clf.n_iter_[0]} iterations")
+
+            # Evaluate
+            print("\nEvaluating ECFP4 linear probe...")
+            ecfp4_metrics = {
+                "train": evaluate_probe(ecfp4_clf, ecfp4_train_X, ecfp4_train_y),
+                "val": evaluate_probe(ecfp4_clf, ecfp4_val_X, ecfp4_val_y),
+                "test": evaluate_probe(ecfp4_clf, ecfp4_test_X, ecfp4_test_y),
+            }
+
+            # Print results
+            print("\n" + "=" * 72)
+            print("ECFP4 Linear Probe Results")
+            print("=" * 72)
+            print(f"{'Split':<10} {'Accuracy':>12} {'AUPRC':>12} {'AUROC':>12} {'F1':>12}")
+            print("-" * 72)
+            for split, m in ecfp4_metrics.items():
+                print(f"{split:<10} {m['accuracy']:>12.4f} {m['auprc']:>12.4f} {m['auroc']:>12.4f} {m['f1']:>12.4f}")
+            print("=" * 72)
+
+            # Save ECFP4 probe and metrics
+            ecfp4_probe_path = output_dir / "linear_probe_ecfp4.joblib"
+            ecfp4_metrics_path = output_dir / "linear_probe_ecfp4_metrics.json"
+
+            print(f"\nSaving ECFP4 probe to {ecfp4_probe_path}...")
+            joblib.dump(ecfp4_clf, ecfp4_probe_path)
+
+            print(f"Saving ECFP4 metrics to {ecfp4_metrics_path}...")
+            with open(ecfp4_metrics_path, "w") as f:
+                json.dump(ecfp4_metrics, f, indent=2)
 
     print("\nDone!")
 
