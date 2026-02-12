@@ -12,12 +12,15 @@ fraction does each method correctly identify as PKS?
 Prerequisites:
     - Run scripts/18_train_supervised_gnn_distributed.py to produce:
         models/supervised_gnn/best_model.pt
+    - Run scripts/08_train_linear_probe_on_GNN_embeddings.py to produce:
+        models/supcon_gnn/linear_probe_ecfp4.joblib
     - Run scripts/11_synthetically_generate_eval_set.py to produce:
         data/processed/eval_pks_products_*_SMILES.txt
 
 Usage:
     python scripts/12_evaluate_probes_on_ood_eval_set.py
     python scripts/12_evaluate_probes_on_ood_eval_set.py --checkpoint models/supervised_gnn/checkpoint_epoch_020.pt
+    python scripts/12_evaluate_probes_on_ood_eval_set.py --ecfp4_probe models/supcon_gnn/linear_probe_ecfp4.joblib
 """
 
 import argparse
@@ -27,12 +30,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+import joblib
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.linear_model import LogisticRegression
 from torch.utils.data import DataLoader, Dataset
 
 from rdkit import Chem, RDLogger
@@ -60,8 +62,8 @@ def parse_args() -> argparse.Namespace:
         help="Path to OOD eval SMILES file (all PKS, label=1)"
     )
     parser.add_argument(
-        "--data_dir", type=str, default="data/",
-        help="Path to data directory (for training ECFP4 baseline)"
+        "--ecfp4_probe", type=str, default="models/supcon_gnn/linear_probe_ecfp4.joblib",
+        help="Path to pre-trained ECFP4 logistic regression probe"
     )
     parser.add_argument(
         "--output_json", type=str, default="models/supervised_gnn/ood_eval_comparison.json",
@@ -436,19 +438,15 @@ def main():
         print(f"  WARNING: {len(gnn_failed)} SMILES failed graph conversion")
     print(f"  Predictions: {len(gnn_probs)}")
 
-    # --- ECFP4 baseline (train from scratch) ---
+    # --- ECFP4 baseline (load pre-trained probe) ---
     print("\n--- ECFP4 Fingerprint Probe ---")
-    train_path = Path(args.data_dir) / "train" / "supcon_train.parquet"
-    print(f"Training ECFP4 baseline from {train_path}...")
-    train_df = pd.read_parquet(train_path)
+    if not Path(args.ecfp4_probe).exists():
+        print(f"Error: ECFP4 probe not found at {args.ecfp4_probe}")
+        print("Run scripts/08_train_linear_probe_on_GNN_embeddings.py first.")
+        sys.exit(1)
 
-    print("  Generating training fingerprints...")
-    train_fps = np.vstack([smiles_to_ecfp4(smi) for smi in train_df["smiles"].astype(str)])
-    train_labels = train_df["label"].to_numpy()
-
-    print(f"  Training LogisticRegression on {len(train_fps)} samples...")
-    clf = LogisticRegression(max_iter=1000, class_weight="balanced", n_jobs=-1)
-    clf.fit(train_fps, train_labels)
+    print(f"Loading pre-trained ECFP4 probe from {args.ecfp4_probe}...")
+    clf = joblib.load(args.ecfp4_probe)
 
     print("Computing ECFP4 fingerprints for OOD molecules...")
     ecfp4_fps, ecfp4_failed = get_ecfp4_fingerprints(smiles_list)
