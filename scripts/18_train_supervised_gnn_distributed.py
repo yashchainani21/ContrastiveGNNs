@@ -32,6 +32,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
+from sklearn.metrics import average_precision_score
 from torch.utils.data.distributed import DistributedSampler
 
 from rdkit import Chem
@@ -69,6 +70,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pos_weight", type=float, default=2.0,
         help="Positive class weight for BCEWithLogitsLoss (compensates class imbalance)"
+    )
+    parser.add_argument(
+        "--scheduler", action="store_true", default=False,
+        help="Enable cosine annealing LR scheduler with linear warmup (first 5%% of epochs)"
+    )
+    parser.add_argument(
+        "--warmup_fraction", type=float, default=0.05,
+        help="Fraction of total epochs for linear warmup (only used with --scheduler)"
     )
 
     # Model architecture
@@ -550,13 +559,13 @@ def train_epoch(
 
     Returns:
         avg_loss: Average BCE loss across batches
-        accuracy: Classification accuracy
+        auprc: Area under precision-recall curve
     """
     model.train()
     total_loss = 0.0
-    correct = 0
-    total = 0
     num_batches = 0
+    all_probs = []
+    all_labels = []
 
     for batch in loader:
         node_feat = batch["node_feat"].to(device)
@@ -578,14 +587,18 @@ def train_epoch(
         optimizer.step()
 
         total_loss += loss.item()
-        preds = (logits > 0).float()  # threshold at 0 for logits
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
+        all_probs.append(torch.sigmoid(logits).detach().cpu().numpy())
+        all_labels.append(labels.cpu().numpy())
         num_batches += 1
 
     avg_loss = total_loss / max(num_batches, 1)
-    accuracy = correct / max(total, 1)
-    return avg_loss, accuracy
+    if all_probs:
+        probs = np.concatenate(all_probs).ravel()
+        labels_np = np.concatenate(all_labels).ravel()
+        auprc = average_precision_score(labels_np, probs)
+    else:
+        auprc = 0.0
+    return avg_loss, auprc
 
 
 @torch.no_grad()
@@ -595,17 +608,17 @@ def eval_epoch(
     criterion: nn.BCEWithLogitsLoss,
     device: torch.device,
 ) -> Tuple[float, float]:
-    """Evaluate loss and accuracy on a dataset (single GPU).
+    """Evaluate loss and AUPRC on a dataset (single GPU).
 
     Returns:
         avg_loss: Average BCE loss
-        accuracy: Classification accuracy
+        auprc: Area under precision-recall curve
     """
     model.eval()
     total_loss = 0.0
-    correct = 0
-    total = 0
     num_batches = 0
+    all_probs = []
+    all_labels = []
 
     for batch in loader:
         node_feat = batch["node_feat"].to(device)
@@ -619,14 +632,18 @@ def eval_epoch(
 
         if torch.isfinite(loss):
             total_loss += loss.item()
-            preds = (logits > 0).float()
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+            all_probs.append(torch.sigmoid(logits).cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
             num_batches += 1
 
     avg_loss = total_loss / max(num_batches, 1)
-    accuracy = correct / max(total, 1)
-    return avg_loss, accuracy
+    if all_probs:
+        probs = np.concatenate(all_probs).ravel()
+        labels_np = np.concatenate(all_labels).ravel()
+        auprc = average_precision_score(labels_np, probs)
+    else:
+        auprc = 0.0
+    return avg_loss, auprc
 
 
 def save_checkpoint(
@@ -635,8 +652,8 @@ def save_checkpoint(
     epoch: int,
     train_loss: float,
     val_loss: float,
-    train_acc: float,
-    val_acc: float,
+    train_auprc: float,
+    val_auprc: float,
     best_val_loss: float,
     args: argparse.Namespace,
     path: Path,
@@ -655,8 +672,8 @@ def save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "train_loss": train_loss,
         "val_loss": val_loss,
-        "train_acc": train_acc,
-        "val_acc": val_acc,
+        "train_auprc": train_auprc,
+        "val_auprc": val_auprc,
         "best_val_loss": best_val_loss,
         "args": vars(args),
     }
@@ -781,6 +798,22 @@ def main():
         weight_decay=args.weight_decay,
     )
 
+    # LR scheduler (optional cosine annealing with linear warmup)
+    scheduler = None
+    if args.scheduler:
+        total_epochs = args.epochs
+        warmup_epochs = max(1, int(args.warmup_fraction * total_epochs))
+
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                return (epoch + 1) / warmup_epochs  # Linear warmup from ~0 to 1
+            # Cosine decay from 1 to 0 over remaining epochs
+            progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
+            return 0.5 * (1.0 + np.cos(np.pi * progress))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        log_rank0(f"  Scheduler: cosine annealing with {warmup_epochs}-epoch linear warmup", is_distributed)
+
     # Resume from checkpoint if provided
     start_epoch = 1
     best_val_loss = float("inf")
@@ -800,11 +833,18 @@ def main():
     log_rank0(f"  Learning rate: {args.lr}", is_distributed)
     log_rank0(f"  Epochs: {args.epochs}", is_distributed)
     log_rank0("", is_distributed)
-    log_rank0(
-        f"{'Epoch':>5} {'Train Loss':>12} {'Train Acc':>10} {'Val Loss':>12} {'Val Acc':>10} {'Best':>6}",
-        is_distributed,
-    )
-    log_rank0("-" * 60, is_distributed)
+    if scheduler is not None:
+        log_rank0(
+            f"{'Epoch':>5} {'Train Loss':>12} {'Train AUPRC':>12} {'Val Loss':>12} {'Val AUPRC':>12} {'LR':>10} {'Best':>6}",
+            is_distributed,
+        )
+        log_rank0("-" * 74, is_distributed)
+    else:
+        log_rank0(
+            f"{'Epoch':>5} {'Train Loss':>12} {'Train AUPRC':>12} {'Val Loss':>12} {'Val AUPRC':>12} {'Best':>6}",
+            is_distributed,
+        )
+        log_rank0("-" * 62, is_distributed)
 
     for epoch in range(start_epoch, args.epochs + 1):
         # Set epoch for DistributedSampler (ensures different shuffling each epoch)
@@ -812,43 +852,54 @@ def main():
             train_sampler.set_epoch(epoch)
 
         # Train
-        train_loss, train_acc = train_epoch(
+        train_loss, train_auprc = train_epoch(
             model, train_loader, optimizer, criterion, device
         )
 
         # Validate (on rank 0 only to avoid duplicate computation)
         if get_rank(is_distributed) == 0:
-            val_loss, val_acc = eval_epoch(model, val_loader, criterion, device)
+            val_loss, val_auprc = eval_epoch(model, val_loader, criterion, device)
         else:
             val_loss = 0.0
-            val_acc = 0.0
+            val_auprc = 0.0
 
-        # Broadcast val_loss and val_acc to all ranks
+        # Broadcast val_loss and val_auprc to all ranks
         if is_distributed:
             val_loss_tensor = torch.tensor(val_loss, device=device)
             dist.broadcast(val_loss_tensor, src=0)
             val_loss = val_loss_tensor.item()
 
-            val_acc_tensor = torch.tensor(val_acc, device=device)
-            dist.broadcast(val_acc_tensor, src=0)
-            val_acc = val_acc_tensor.item()
+            val_auprc_tensor = torch.tensor(val_auprc, device=device)
+            dist.broadcast(val_auprc_tensor, src=0)
+            val_auprc = val_auprc_tensor.item()
+
+        # Step LR scheduler (after validation, before checkpointing)
+        if scheduler is not None:
+            scheduler.step()
 
         # Track best
         is_best = val_loss < best_val_loss
         if is_best:
             best_val_loss = val_loss
 
-        log_rank0(
-            f"{epoch:>5} {train_loss:>12.4f} {train_acc:>10.4f} {val_loss:>12.4f} {val_acc:>10.4f} {'*' if is_best else '':>6}",
-            is_distributed,
-        )
+        if scheduler is not None:
+            current_lr = optimizer.param_groups[0]["lr"]
+            log_rank0(
+                f"{epoch:>5} {train_loss:>12.4f} {train_auprc:>12.4f} {val_loss:>12.4f} {val_auprc:>12.4f} {current_lr:>10.2e} {'*' if is_best else '':>6}",
+                is_distributed,
+            )
+        else:
+            log_rank0(
+                f"{epoch:>5} {train_loss:>12.4f} {train_auprc:>12.4f} {val_loss:>12.4f} {val_auprc:>12.4f} {'*' if is_best else '':>6}",
+                is_distributed,
+            )
 
         # Save checkpoint
         if epoch % args.save_every == 0 or epoch == args.epochs:
             ckpt_path = output_dir / f"checkpoint_epoch_{epoch:03d}.pt"
             save_checkpoint(
                 model, optimizer, epoch, train_loss, val_loss,
-                train_acc, val_acc, best_val_loss, args,
+                train_auprc, val_auprc, best_val_loss, args,
                 ckpt_path, is_distributed,
             )
             log_rank0(f"  Saved checkpoint: {ckpt_path}", is_distributed)
@@ -858,7 +909,7 @@ def main():
             best_path = output_dir / "best_model.pt"
             save_checkpoint(
                 model, optimizer, epoch, train_loss, val_loss,
-                train_acc, val_acc, best_val_loss, args,
+                train_auprc, val_auprc, best_val_loss, args,
                 best_path, is_distributed,
             )
 
